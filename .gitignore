@@ -1,0 +1,13 @@
+.test-deps/
+.test-deps-linux/
+tests/native/runtime/
+tests/native/storage/
+tests/native/ugc/
+tests/native/logs/
+tests/native/*.copied
+__pycache__/
+*.pyc
+backups/
+dist/
+greasyfork-533536/
+tools-annotate/

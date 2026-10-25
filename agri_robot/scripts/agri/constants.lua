@@ -1,0 +1,53 @@
+local C = {
+    VERSION = "0.2.0-simple.5",
+    SOURCE_BUILD = 756039,
+    SCHEMA_VERSION = 1,
+    RADII = { 8, 12, 16, 20, 24 },
+    DEFAULT_RADIUS = 16,
+    WORK_SLOTS = 18,
+    WATER_SLOTS = 5,
+    MODULE_SLOT = 24,
+    -- Slot 25 was the plow tool slot. It stays allocated (30 backend slots)
+    -- so saved slot numbers keep their meaning; it is hidden and never
+    -- accepts items except while an old save loads into it.
+    LEGACY_PLOW_SLOT = 25,
+    TOOL_FIRST = 26,
+    TOOL_LAST = 30,
+    ROBOT_SLOTS = 30,
+    TOOL_NAMES = { "园艺锄", "铲子", "锤子", "斧头", "镐子" },
+    EXISTING_SOIL_GRID_HALFSPAN = 1.9,
+    LAYOUT_FALLBACK_NODES = 3000,
+    FOUR_ROW_SOIL_MARGIN = 0.03,
+    SOIL_TEMPLATE_MATCH_TOLERANCE = 0.005,
+    WAREHOUSE_SEED_SLOTS = 12,
+    WAREHOUSE_FERTILIZER_SLOTS = 12,
+    WAREHOUSE_CROP_SLOTS = 24,
+    WAREHOUSE_MODULE_SLOT = 49,
+    THERMOSTAT_TEMPERATURE = 70,
+    SCAN_INTERVAL = 2,
+    PLAN_INTERVAL = 10,
+    EXECUTOR_INTERVAL = 0.5,
+    CLAIM_TIMEOUT = 45,
+    TASK_TIMEOUT = 40,
+    MAX_RETRIES = 3,
+    BLOCK_RETRY_INTERVAL = 10,
+    LOCK_TIMEOUT = 15,
+    INTERACT_DISTANCE = 8,
+    RANGE_DURATION = 8,
+    MAX_BLUEPRINT_CELLS = 144,
+    RPC_MAX_BYTES = 18000,
+    SNAPSHOT_MAX_BYTES = 52000,
+    SEASONS = { "autumn", "winter", "spring", "summer" },
+    -- Holes per farm plot supported by layout_planner templates.
+    DENSITIES = { "dynamic", "6", "7", "8", "9", "10", "16" },
+    DENSITY_CHOICES = { "6", "7", "8", "9", "10", "16" },
+    DEFAULT_DENSITY = "9",
+    PLAN_MAX_PER_CROP = 64,
+    PLAN_MAX_TOTAL = 256,
+}
+C.DEFAULT_SETTINGS = {
+    running = true, mode = "stable", radius = C.DEFAULT_RADIUS,
+    allow_random = false, density = "9", planting = "auto", continuous = true,
+    plan = {},
+}
+return C
