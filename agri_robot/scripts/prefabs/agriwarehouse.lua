@@ -1,5 +1,16 @@
-local assets = { Asset("ANIM", "anim/treasure_chest.zip") }
+local assets = {
+    Asset("ANIM", "anim/treasure_chest.zip"),
+    -- Explicitly preload this custom prefab's native visual metadata.
+    Asset("ANIM", "anim/dynamic/treasurechest_cotl_basic.zip"),
+    Asset("PKGREF", "anim/dynamic/treasurechest_cotl_basic.dyn"),
+}
 local prefabs = { "collapse_big" }
+local function appearance(inst)
+    -- Use the same skin/build pair as the native Flock's Chest initializer.
+    -- A mod prefab has no native skin selection, so renderer clients also
+    -- apply its fixed look after initial replication, including loaded boxes.
+    inst.AnimState:SetSkin("treasurechest_cotl_basic","treasure_chest")
+end
 
 local function hammered(inst, worker)
     if not worker or not worker:HasTag("player") then inst.components.workable:SetWorkLeft(4); return end
@@ -21,13 +32,17 @@ local function fn()
     inst.AnimState:SetBank("chest")
     inst.AnimState:SetBuild("treasure_chest")
     inst.AnimState:PlayAnimation("closed")
-    inst.AnimState:SetMultColour(0.76, 0.91, 0.68, 1)
     inst:AddTag("structure")
     inst:AddTag("chest")
     inst:AddTag("agriwarehouse")
     inst:AddTag("_container")
     inst.entity:SetPristine()
+    if not TheNet:IsDedicated() then
+        inst.OnEntityReplicated=appearance
+        inst:DoTaskInTime(0,appearance)
+    end
     if not TheWorld.ismastersim then return inst end
+    appearance(inst)
     inst:AddComponent("inspectable")
     inst:AddComponent("container")
     inst.components.container:WidgetSetup("agriwarehouse")
@@ -56,4 +71,5 @@ local function fn()
 end
 
 return Prefab("agriwarehouse", fn, assets, prefabs),
-    MakePlacer("agriwarehouse_placer", "chest", "treasure_chest", "closed")
+    MakePlacer("agriwarehouse_placer", "chest", "treasure_chest", "closed",
+        nil,nil,nil,nil,nil,nil,appearance)

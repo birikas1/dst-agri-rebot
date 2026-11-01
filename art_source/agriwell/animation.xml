@@ -1,0 +1,1 @@
+<Anims><anim name="idle" root="agriwell" framerate="30"><frame x="0" y="-100.64999999999999" w="393.59999999999997" h="359.7"><element name="wellbody" frame="0" layername="body" m_a="0.3" m_b="0" m_c="0" m_d="0.3" m_tx="0" m_ty="0" z_index="0"/></frame></anim></Anims>

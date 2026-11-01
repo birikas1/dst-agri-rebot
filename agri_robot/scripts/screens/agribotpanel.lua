@@ -46,7 +46,9 @@ for key,value in pairs({
     OFFGRID_PLANT="地块里有不在网格上的作物",randomseed="通用种子",
     WATER_MOISTURE_UNKNOWN="读不到土壤湿度，暂不浇水",WATER_NO_CAN="作物缺水：没有水壶",
     WATER_CAN_NOT_CARRIED="作物缺水：请把水壶放进机器人的水壶格",WATER_NO_SOURCE="作物缺水：水壶已空且范围内没有水源",
-    WATER_REFILLING="水壶已空，先去补水再浇",MOISTURE_SNAPSHOT_UNAVAILABLE="土壤湿度读取失败",moisture_unknown="读不到土壤湿度，本次未浇水",
+    WATER_REFILLING="水壶已空，先去补水再浇",
+    zone_paused="田块已暂停",zone_editing="田块编辑中",zone_invalidated="田块方案已变化",
+    ZONE_WITHHELD="部分孔位暂缓",ZONE_REVIEW="田块方案待确认",ADJACENT_ZONE_SPACING="相邻田块孔距不足",MOISTURE_SNAPSHOT_UNAVAILABLE="土壤湿度读取失败",moisture_unknown="读不到土壤湿度，本次未浇水",
 }) do labels[key]=value end
 local function name(value)
     if value==nil then return "—" end
@@ -105,9 +107,11 @@ local Panel=Class(Screen,function(self,robot,snapshot,send)
     self:Button(self.root,"关闭",465,285,function()self:Close()end)
     -- Simple branch: blueprint, seasonal presets and recommendations are hidden.
     local tabs={{"status","管理"},{"plan","农业计划"},{"resources","资源"},{"help","使用方法"}}
+    if snapshot.zones_enabled then table.insert(tabs,2,{"zones","田块列表"}) end
+    local step=#tabs>4 and 180 or 220
     self.plan=U.Copy(snapshot.settings.plan or {})
     for i,tab in ipairs(tabs) do
-        self:Button(self.root,tab[2],-330+(i-1)*220,238,function()
+        self:Button(self.root,tab[2],-(#tabs-1)*step/2+(i-1)*step,238,function()
             self.page=tab[1];self.textpage=1;self:Render()
             if self.page=="recommendations" then self.send({cmd="recommendations",page=1}) end
         end)
@@ -170,9 +174,12 @@ function Panel:RenderStatus()
     self:Label(self.body,"工作组 "..self.snapshot.group_id.."  ·  "..#self.snapshot.members.." 台机器人  ·  "..name(self.snapshot.season).."季",-230,190,22)
     self:Button(self.body,s.running and "运行中 · 点击暂停" or "已暂停 · 点击运行",190,190,function()self:Setting("running",not s.running)end,20)
     self:Button(self.body,"打开机器人库存",400,190,function()self.send({cmd="inventory"})end,20)
+    -- Zone groups: these two rows are the DEFAULT template that zones without
+    -- their own plan use (ratio, filling each zone's own capacity).
+    local zoned=self.snapshot.zones_enabled==true
     -- 1. Planting density: holes per farm plot.
     local density=tostring(s.density=="dynamic" and C.DEFAULT_DENSITY or s.density)
-    self:Label(self.body,"种植密度（每块农田的孔数）",-330,140,20)
+    self:Label(self.body,zoned and "默认每格孔数（未单独设置的田块）" or "种植密度（每块农田的孔数）",-330,140,20)
     for i,d in ipairs(C.DENSITY_CHOICES) do
         self:Button(self.body,(density==d and "● " or "")..d.." 孔",-110+(i-1)*95,140,function()self:Setting("density",d)end)
     end
@@ -182,7 +189,11 @@ function Panel:RenderStatus()
     local total=0;for _,v in pairs(self.plan) do total=total+v end
     local n=tonumber(density) or 9
     local plots=(self.snapshot.farm_stats or {}).plots or 0
-    self:Label(self.body,"种植方案：共 "..total.." 株 · 需要 "..math.ceil(total/n).." 块农田（现有 "..plots.." 块）",0,90,20)
+    if zoned then
+        self:Label(self.body,"默认比例模板：每个田块按此比例填满自己的容量 · 当前 "..#(self.snapshot.zones or {}).." 个田块（点田块上方标签可单独设置）",0,90,19)
+    else
+        self:Label(self.body,"种植方案：共 "..total.." 株 · 需要 "..math.ceil(total/n).." 块农田（现有 "..plots.." 块）",0,90,20)
+    end
     local per=12
     local pages=math.max(1,math.ceil(#options/per))
     self.crop_page=math.min(self.crop_page or 1,pages)
@@ -205,7 +216,7 @@ function Panel:RenderStatus()
     self:Button(self.body,"上一页",-250,-200,function()self.crop_page=math.max(1,self.crop_page-1);self:Render()end,19)
     self:Label(self.body,self.crop_page.." / "..pages,-130,-200,18)
     self:Button(self.body,"下一页",-10,-200,function()self.crop_page=math.min(pages,self.crop_page+1);self:Render()end,19)
-    self:Button(self.body,"清空方案",250,-200,function()self.plan={};self:SendPlan();self:Render()end,19)
+    self:Button(self.body,zoned and "清空模板" or "清空方案",250,-200,function()self.plan={};self:SendPlan();self:Render()end,19)
     local nexttask=self.snapshot.tasks.queue and self.snapshot.tasks.queue[1]
     local state=nexttask and ("当前工作："..name(nexttask.kind).." · "..name(nexttask.state)..(nexttask.reason and " · "..name(nexttask.reason) or "")) or "当前没有待执行任务"
     local why={};for i,r in ipairs(self.snapshot.plan.reasons or {}) do if i<=2 then why[#why+1]=name(r.code) end end
@@ -304,14 +315,30 @@ function Panel:RenderRecommendations()
     self:Label(self.body,tostring(data.page or 1),0,-232,18)
     self:Button(self.body,"下一页",190,-232,function()self.send({cmd="recommendations",page=(data.page or 1)+1})end)
 end
+local zone_states={ok="正常",editing="编辑中",paused="已暂停",review="待确认方案",unsafe="密度无法排布",empty="未设置方案"}
+function Panel:RenderZones()
+    local lines={"每片相连的农田是一个田块，各有独立方案。在世界中点击田块上方的浮动标签编辑；",
+        "未单独设置的田块使用“管理”页的默认比例模板。打开本面板会让整组机器人暂停。",""}
+    for _,z in ipairs(self.snapshot.zones or {}) do
+        local crops={}
+        for _,t in ipairs(z.tg or {}) do crops[#crops+1]=self:CropName(t.c).." "..tostring(t.h or 0).."/"..tostring(t.n or 0) end
+        lines[#lines+1]="田块 #"..tostring(z.id):sub(2).." · "..tostring(z.n).." 格 × "..tostring(z.d).." 孔 · "..(z.m=="exact" and "精确数量" or "比例填满")
+            ..(z.cf and "" or "（默认模板）").." · 可用 "..tostring(z.use).."/名义 "..tostring(z.nom).." · 已种 "..tostring(z.pl)
+            ..((z.wh or 0)>0 and " · 暂缓 "..z.wh or "")..((z.miss or 0)>0 and " · 缺种 "..z.miss or "").." · "..(zone_states[z.st] or tostring(z.st))
+        lines[#lines+1]="    "..(#crops>0 and table.concat(crops,"  ") or "无种植目标")
+    end
+    if #(self.snapshot.zones or {})==0 then lines[#lines+1]="工作范围内还没有农田田块（机器人不会自动耕地）。" end
+    self:TextPage(table.concat(lines,"\n"))
+end
 function Panel:Render()
     self.body:KillAllChildren();self.forecast_label=nil
     if self.page=="status" then self:RenderStatus()
+    elseif self.page=="zones" then self:RenderZones()
     elseif self.page=="blueprint" then self:RenderBlueprint()
     elseif self.page=="presets" then self:RenderPresets()
     elseif self.page=="recommendations" then self:RenderRecommendations()
     elseif self.page=="forecast" then self:TextPage(details(self.forecast or {}))
-    elseif self.page=="help" then self:TextPage("1. 把机器人放在空地或农田附近；仓库放在工作范围附近会自动绑定。\n2. 管理页只有两项：种植密度（每块农田打几个孔）和种植方案（每种种子种几株）。\n3. 种植方案总株数 ÷ 密度 = 需要的农田块数。机器人不会自动耕地：农田不够时请自己用耕地机开垦。工作范围内地上的耕地机会被机器人捡起，送进仓库作物/回收区。\n4. 工具格依次是园艺锄、铲子、锤子、斧头、镐子。锄头打孔，铲子清理杂物。耕地机不能放进工具格。\n5. 种子放机器人工作库存或仓库种子区；有多少种多少，不足的部分等补齐后继续种。\n6. 水壶放水壶格；附近有水源会自动补水。成熟作物自动收获，收获后按方案补种。\n7. 打开面板或机器人库存时整个组暂停；关闭后自动恢复。\n8. 农业计划与资源页会显示等待原因。")
+    elseif self.page=="help" then self:TextPage("1. 把机器人放在空地或农田附近；仓库放在工作范围附近会自动绑定。\n2. 每片上下左右相连的农田是一个田块（只斜角相接或隔着空地就是两个田块）。田块上方有浮动标签：点击打开该田块的种植方案，可选“比例填满”或“精确数量”，以及每格孔数。\n3. 管理页是默认比例模板：未单独设置的田块按这个比例填满自己的容量。机器人不会自动耕地：请自己用耕地机开垦。工作范围内地上的耕地机会被机器人捡起，送进仓库作物/回收区。\n4. 工具格依次是园艺锄、铲子、锤子、斧头、镐子。锄头打孔，铲子清理杂物。耕地机不能放进工具格。\n5. 种子放机器人工作库存或仓库种子区；有多少种多少，不足的部分等补齐后继续种。\n6. 水壶放水壶格；附近有水源会自动补水。成熟作物自动收获，收获后按方案补种。\n7. 打开面板或机器人库存时整个组暂停；关闭后自动恢复。\n8. 农业计划与资源页会显示等待原因。")
     elseif self.page=="plan" then self:TextPage("第 "..tostring((self.snapshot.cycles or 0)+1).." 天 · "..name(self.snapshot.season).."季\n"..details(self.snapshot.plan))
     elseif self.page=="resources" then self:TextPage("仓库："..(self.snapshot.warehouse and "已绑定" or "附近未找到").."\n"..details(self.snapshot.farm_stats or {}).."\n"..details(self.snapshot.resources)) end
 end

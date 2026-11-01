@@ -298,14 +298,8 @@ function AgriExecutor:WalkNear(point,distance)
 end
 function AgriExecutor:FindWaterSource(group)
     local p=group.center
-    local best,distance
-    for _, source in ipairs(TheSim:FindEntities(p.x,0,p.z,group.settings.radius,{"watersource"},{"INLIMBO"})) do
-        if source.components.watersource and source.components.watersource.available then
-            local d=self.inst:GetDistanceSqToInst(source)
-            if not distance or d<distance then best,distance=source,d end
-        end
-    end
-    return best
+    return require("agri/water_sources").Pick(
+        TheSim:FindEntities(p.x,0,p.z,group.settings.radius,{"watersource"},{"INLIMBO"}),self.inst)
 end
 -- An off-grid natural hole (intact or broken) exactly at this point. Soils
 -- still bound to a working plow are left alone. With a planned GUID only that
@@ -346,7 +340,14 @@ function AgriExecutor:Manual(task,group)
     end
     if k=="FETCH" or k=="UNLOAD" then
         local requirements=task.data.requirements or task.data.manifest
-        if k=="FETCH" then
+        local primary=k=="FETCH" and requirements and requirements.primary
+        if k=="FETCH" and requirements and requirements.equipment_task then
+            if resource:FindSuppliedEquipment(requirements.equipment_task) then self:Finish(true);return true end
+        elseif primary and primary.prefab then
+            -- The trip serves the suspended action; its input is enough, the
+            -- rest of the batch is optional.
+            if resource:CountPrefab(primary.prefab,primary.category=="fertilizers")>0 then self:Finish(true);return true end
+        elseif k=="FETCH" then
             local enough=true
             for _,category in ipairs({"seeds","fertilizers"}) do
                 for prefab,amount in pairs(requirements and requirements[category] or {}) do

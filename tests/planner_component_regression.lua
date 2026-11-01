@@ -46,14 +46,15 @@ local function waters(tasks) local out={};for _,t in ipairs(tasks) do if t.kind=
 local function coded(summary,code) for _,r in ipairs(summary.water_reasons) do if r.code==code then return true end end;return false end
 local tasks,summary=planner:Maintenance(watering({moisture=0}),true)
 local w=waters(tasks)
-assert(#w==1 and w[1].id=="water:farm:10" and w[1].data.simple and math.abs(w[1].data.water_below-4)<1e-9,"dry soil gets one current-soil water job")
+assert(#w==1 and w[1].id=="water:farm:10" and w[1].data.simple and w[1].data.water_below>4
+    and w[1].priority<3 and w[1].deadline<=100,"dry soil gets one urgent water job with travel reserve")
 assert(#waters(planner:Maintenance(watering({moisture=20}),true))==0,"moist soil is not watered again")
 tasks,summary=planner:Maintenance(watering({}),true)
 assert(#waters(tasks)==0 and coded(summary,"WATER_MOISTURE_UNKNOWN"),"unknown soil moisture is reported, not guessed")
 tasks,summary=planner:Maintenance(watering({moisture=0,cans={}}),true)
 assert(#waters(tasks)==0 and coded(summary,"WATER_NO_CAN"),"a missing can is reported")
 tasks,summary=planner:Maintenance(watering({moisture=0,cans={{guid=1,uses=10,capacity=40,addwetness=25,carried=false}}}),true)
-assert(#waters(tasks)==0 and coded(summary,"WATER_CAN_NOT_CARRIED"),"a warehouse-only can is reported")
+assert(#waters(tasks)>0 and not coded(summary,"WATER_CAN_NOT_CARRIED"),"a warehouse-only can must create a water task that can fetch it")
 tasks,summary=planner:Maintenance(watering({moisture=0,cans={{guid=1,uses=0,capacity=40,addwetness=25,carried=true}}}),true)
 assert(#waters(tasks)==1 and coded(summary,"WATER_NO_SOURCE"),"an empty can still reaches the executor's REFILL stop")
 local reuse=watering({moisture=0});reuse.water_tasks={farm="older-water"}

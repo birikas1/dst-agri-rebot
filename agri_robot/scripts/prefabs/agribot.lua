@@ -1,7 +1,7 @@
 local C = require("agri/constants")
 local U = require("agri/util")
 local assets = { Asset("ANIM", "anim/winona_storage_robot.zip") }
-local prefabs = { "collapse_small" }
+local prefabs = { "collapse_small", "agriworkcenter", "reticuleaoe" }
 
 local function registry(inst)
     return TheWorld and TheWorld.components.agrifarmgroup
@@ -110,14 +110,21 @@ local function fn()
     inst:SetBrain(require("brains/agribotbrain"))
     inst.OnSave = function(entity, data)
         data.agri = { placement_order = entity._agri_order, group_id = entity._agri_group_id,
+            origin = U.Copy(entity._agri_build_origin),
             personal_settings = U.Copy(entity._agri_personal_settings) }
     end
     inst.OnLoad = function(entity, data)
         entity._agri_saved = data and data.agri or nil
+        entity._agri_build_origin=U.Copy(entity._agri_saved and entity._agri_saved.origin)
     end
     inst.OnLoadPostPass = function(entity)
         register(entity)
     end
+    inst:ListenForEvent("onbuilt",function(entity)
+        local x,_,z=entity.Transform:GetWorldPosition()
+        entity._agri_build_origin={x=x,z=z}
+        register(entity)
+    end)
     inst:ListenForEvent("onremove", function(entity)
         local groups = registry(entity)
         if groups then groups:Unregister(entity) end
@@ -126,5 +133,7 @@ local function fn()
     return inst
 end
 
-return Prefab("agribot", fn, assets, prefabs),
-    MakePlacer("agribot_placer", "winona_storage_robot", "winona_storage_robot", "idle_off")
+local placer=MakePlacer("agribot_placer", "winona_storage_robot", "winona_storage_robot", "idle_off",
+    nil,nil,nil,nil,nil,nil,require("agri/work_range").SetupPlacer)
+placer.deps={"reticuleaoe"}
+return Prefab("agribot", fn, assets, prefabs),placer

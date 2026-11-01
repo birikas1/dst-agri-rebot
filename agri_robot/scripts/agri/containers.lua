@@ -30,17 +30,23 @@ function M.Register(env)
     local function section(cols, rows, left)
         for row = 0, rows - 1 do
             for col = 0, cols - 1 do
-                warehouse.widget.slotpos[#warehouse.widget.slotpos + 1] = Vector3(left + col * 68, 108 - row * 68, 0)
+                warehouse.widget.slotpos[#warehouse.widget.slotpos + 1] = Vector3(left + col * 68, 160 - row * 64, 0)
             end
         end
     end
     section(3, 4, -400)
     section(3, 4, -176)
     section(6, 4, 48)
-    warehouse.widget.slotpos[C.WAREHOUSE_MODULE_SLOT] = Vector3(0, 220, 0)
+    warehouse.widget.slotpos[C.WAREHOUSE_MODULE_SLOT] = Vector3(0, 272, 0)
+    for group=0,5 do
+        local lo=group<5 and C.WAREHOUSE_TOOL_FIRST+group*3 or C.WAREHOUSE_WATER_FIRST
+        local x=(group%3-1)*280
+        local y=-148-math.floor(group/3)*130
+        for col=0,2 do warehouse.widget.slotpos[lo+col]=Vector3(x+(col-1)*68,y,0) end
+    end
     containers.params.agribot = robot
     containers.params.agriwarehouse = warehouse
-    containers.MAXITEMSLOTS = math.max(containers.MAXITEMSLOTS or 0, C.WAREHOUSE_MODULE_SLOT)
+    containers.MAXITEMSLOTS = math.max(containers.MAXITEMSLOTS or 0, C.WAREHOUSE_SLOTS)
     if env.AddClassPostConstruct then
         env.AddClassPostConstruct("widgets/containerwidget", function(widget)
             local open, close = widget.Open, widget.Close
@@ -73,11 +79,15 @@ function M.Register(env)
                 end
                 if self.bgimage and self.bgimage.Hide then self.bgimage:Hide() end
                 if container.prefab == "agriwarehouse" then
-                    panel(0, 49, 896, 440)
-                    label(-332, 158, "种子 ×12")
-                    label(-108, 158, "肥料 ×12")
-                    label(218, 158, "作物/回收物 ×24")
-                    label(0, 274, "仓库升级")
+                    panel(0, 0, 896, 684)
+                    label(-332, 212, "种子 ×12")
+                    label(-108, 212, "肥料 ×12")
+                    label(218, 212, "作物/回收物 ×24")
+                    label(0, 324, "仓库升级")
+                    for group=0,5 do
+                        local name=group<5 and C.TOOL_NAMES[group+1] or "水壶"
+                        label((group%3-1)*280,-96-math.floor(group/3)*130,name.." ×3")
+                    end
                 else
                     panel(0, -15, 470, 660)
                     label(0, 158, "工作库存 ×18")

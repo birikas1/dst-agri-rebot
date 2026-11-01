@@ -60,6 +60,30 @@ function M.Preset(season,data,crops)
     return out
 end
 
+-- Zone HUD requests (separate from the robot panel envelope):
+--   {cmd="list"}                                   read-only badge list
+--   {cmd="open"|"ping"|"close", zone="z<n>"}       editor lock
+--   {cmd="save", zone, rev, settings={mode,density,weights,counts}}
+--   {cmd="pause"|"resume"|"template", zone, rev}
+-- Only the envelope is checked here; settings are validated by
+-- field_zones.Clean and access/lock/revision by the registry.
+M.ZONE_COMMANDS={list=true,open=true,ping=true,close=true,save=true,pause=true,resume=true,template=true}
+M.ZONE_EDITS={save=true,pause=true,resume=true,template=true}
+function M.ZoneRequest(value)
+    if type(value)~="table" or type(value.cmd)~="string" or not M.ZONE_COMMANDS[value.cmd] then return false end
+    for key in pairs(value) do
+        if key~="cmd" and key~="zone" and key~="rev" and key~="settings" then return false end
+    end
+    if value.cmd=="list" then return value.zone==nil and value.rev==nil and value.settings==nil end
+    if type(value.zone)~="string" or #value.zone>16 or not value.zone:match("^z%d+$") then return false end
+    if M.ZONE_EDITS[value.cmd] then
+        if not U.Finite(value.rev) or value.rev%1~=0 or value.rev<1 then return false end
+        if value.cmd=="save" then return type(value.settings)=="table" end
+        return value.settings==nil
+    end
+    return value.rev==nil and value.settings==nil
+end
+
 function M.Envelope(value)
     if type(value)~="table" or type(value.cmd)~="string" or #value.cmd>32 then return false end
     return U.Contains({"open","close","ping","settings","preset","preview","blueprint","fill","recalculate","range","visibility","warehouse","inventory","close_inventory","recommendations"},value.cmd)

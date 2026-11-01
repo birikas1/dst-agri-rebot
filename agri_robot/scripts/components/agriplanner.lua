@@ -10,6 +10,8 @@ local U=require("agri/util")
 local C=require("agri/constants")
 local T=require("agri/task_types")
 local Simple=require("agri/simple_planner")
+local Fields=require("agri/field_zones")
+local Zone=require("agri/zone_planner")
 local function positionkey(p) return string.format("%.2f:%.2f",p.x,p.z) end
 local function shallow(t) local o={};for k,v in pairs(t or {}) do o[k]=v end;return o end
 local function reasons(search)
@@ -24,8 +26,17 @@ local function task(tasks,id,kind,p,extra)
 end
 -- Simple management waters the measured soil of a plot with living crops,
 -- whether or not the old stage forecast is known or still recoverable. A task
--- is one native use; the next plan reads the soil again. Soil above the level
--- that would last two plan intervals counts as moist and is not watered.
+-- is one native use; the next plan reads the soil again.
+-- reserve is the time a robot needs from "must water now" to the pour: one
+-- crossing of the work area (three when the can must be refilled first) plus
+-- preemption and the pour, and one plan interval so a failed use can retry
+-- before the soil is dry. A job is queued once the measured soil would last
+-- less than reserve plus two plan intervals; until its deadline (dry-out time
+-- minus reserve) it is ordinary stage work after planting, from then on it is
+-- time-critical (priority 1, the viability class) and preempts preparation
+-- and unrelated P2 logistics. Soil holding more is moist and
+-- is not watered; the level never exceeds what one pour can add without
+-- overflowing the tile.
 local function simple_water(tasks,summary,snapshot,cell,base_drain,drink)
     local tile=cell.moisture or {}
     local function note(code) summary.water_reasons[#summary.water_reasons+1]={code=code,cell=cell.key} end
@@ -35,18 +46,31 @@ local function simple_water(tasks,summary,snapshot,cell,base_drain,drink)
     if loss<0 then return end -- Current rain is already wetting this plot.
     local water=snapshot.resources.water or {}
     local per_use=water.soil_per_use or water.per_use or 0
-    local threshold=loss*C.PLAN_INTERVAL*2
-    if per_use>0 then threshold=math.min(threshold,per_use*.5) end
-    if tile.moisture>threshold then return end
     local carried,uses=0,0
-    for _,can in ipairs(water.cans or {}) do if can.carried~=false then carried=carried+1;uses=uses+(can.uses or 0) end end
+    for _,can in ipairs(water.cans or {}) do
+        if can.carried~=false then carried=carried+1 end
+        uses=uses+(can.uses or 0)
+    end
+    local radius=tonumber(snapshot.settings and snapshot.settings.radius) or C.DEFAULT_RADIUS
+    local trip=2*radius/C.WATER_WALK_SPEED+C.WATER_ACTION_OVERHEAD
+    local reserve=trip*(uses>0 and 1 or 3)+C.PLAN_INTERVAL+(carried==0 and trip or 0)
+    local threshold=loss*(C.PLAN_INTERVAL*2+reserve)
+    if per_use>0 then
+        local capacity=tonumber(tile.capacity)
+        threshold=math.min(threshold,capacity and math.max(per_use*.5,capacity-per_use) or per_use*.5)
+    end
+    if tile.moisture>threshold then return end
     if #(water.cans or {})==0 then note("WATER_NO_CAN");return end
-    if carried==0 then note("WATER_CAN_NOT_CARRIED");return end
     -- An empty can still gets the job: the executor turns it into REFILL, or
     -- into the visible no_water_source stop when no source is in range.
     if uses<=0 then note(water.has_source and "WATER_REFILLING" or "WATER_NO_SOURCE") end
     local id=(snapshot.water_tasks or {})[cell.key] or "water:"..cell.key..":"..tostring(math.floor(snapshot.now/C.PLAN_INTERVAL))
-    task(tasks,id,"WATER",{x=cell.x,z=cell.z},{priority=3,data={cell=cell.key,simple=true,water_below=threshold,measured=tile.moisture,per_use=per_use}})
+    local dry_in=loss>0 and tile.moisture/loss or tile.moisture>0 and math.huge or 0
+    local deadline=dry_in<math.huge and snapshot.now+dry_in-reserve or nil
+    -- The scheduler also escalates at deadline between rescans; a rescan only
+    -- ever raises an existing job's priority (SetPlan keeps the minimum).
+    task(tasks,id,"WATER",{x=cell.x,z=cell.z},{priority=deadline and deadline<=snapshot.now and 1 or 3,deadline=deadline,
+        data={cell=cell.key,simple=true,water_below=threshold,measured=tile.moisture,per_use=per_use,dry_in=dry_in<math.huge and dry_in or nil,reserve=reserve}})
     summary.water_uses=summary.water_uses+1
 end
 local AgriPlanner=Class(function(self,inst)
@@ -332,6 +356,10 @@ function AgriPlanner:PlanSimple(group,snapshot)
         for child,t in pairs(scheduler.tasks) do if t.parent_id==id and live(t) then cancellations[#cancellations+1]=child end end
     end end
     for _,t in ipairs(result.tasks) do tasks[#tasks+1]=t end
+    -- Category order across all selected plots (clear, remove natural holes,
+    -- till, plant, water, tend) is a scheduler gate on this stage, not the
+    -- insertion order above, so saved FIFO sequences cannot bypass it.
+    for _,t in ipairs(tasks) do t.stage=T.SimpleStage(t) end
     -- Watering problems come first: the status line shows the first reasons.
     local reasons,seen={},{}
     for _,r in ipairs(maintenance.water_reasons or {}) do if not seen[r.code] then seen[r.code]=true;reasons[#reasons+1]=r end end
@@ -353,10 +381,140 @@ function AgriPlanner:PlanSimple(group,snapshot)
         recommendations={},viability_failures=maintenance.viability_failures,generated_at=snapshot.now,
         summary={simple=result.summary,maintenance=maintenance,source_build=C.SOURCE_BUILD}}
 end
+-- Zone branch (real groups carry zones_enabled): every edge-connected farm
+-- area is a zone with its own plan from the world zone store. All zone
+-- work carries data.zone_id; maintenance is tagged by its plot.
+local function tilecenter(cell) return {x=cell.x,z=cell.z} end
+function AgriPlanner:PlanZones(group,snapshot)
+    snapshot.center=group.center
+    local registry=group.zone_registry
+    group.zone_store=registry and registry.zones or group.zone_store or {records={},next_id=1}
+    local store=group.zone_store
+    local now=snapshot.now or 0
+    local template=Fields.Template(group.settings)
+    local discovered=Fields.Discover(snapshot.cells)
+    local ids=Fields.Reconcile(store,discovered,{scanned=snapshot.scanned_tiles,group_id=group.id})
+    -- Intentional zone holds (player pause / open editor), read fresh so a
+    -- pause takes effect on this plan, not one tick later.
+    local holds=registry and registry.ZoneHolds and registry:ZoneHolds(group) or group.zone_holds or {}
+    group.zone_holds=holds
+    local zones,cellzone,current={}, {},{}
+    for zi,zone in ipairs(discovered) do
+        local record=store.records[ids[zi]]
+        -- Another live group that saw this zone recently keeps managing it.
+        if not (registry and registry.ZoneForeign and registry:ZoneForeign(record,group,now)) then
+            record.group_id=group.id;record.last_seen=now
+            zone.id,zone.record=record.id,record
+            zone.settings=Fields.Effective(record,template)
+            zone.density=zone.settings.density
+            zone.hold_planting=record.review~=nil
+            zone.hold_stock=holds[record.id]~=nil or record.paused==true
+            -- Hole preparation is named by a per-zone layout generation that
+            -- only a density change advances (completed tills of an older
+            -- layout are never reused).
+            if record.slot_layout~=zone.density then
+                if record.slot_layout and record.slot_layout~="" then record.layout_epoch=(record.layout_epoch or 0)+1 end
+                record.slot_layout=zone.density
+            end
+            local sx,sz=0,0;for _,cell in ipairs(zone.cells) do sx,sz=sx+cell.x,sz+cell.z end
+            zone.distance=U.DistanceSq({x=sx/#zone.cells,z=sz/#zone.cells},group.center or {x=0,z=0})
+            zones[#zones+1]=zone;current[record.id]=true
+            for _,cell in ipairs(zone.cells) do cellzone[cell.key]=record.id end
+        end
+    end
+    -- Nearest zones first: they take the shared seed stock first, in a
+    -- stable order, so a rescan never moves the last seeds between plans.
+    table.sort(zones,function(a,b) if a.distance~=b.distance then return a.distance<b.distance end return Fields.IdLess(a.id,b.id) end)
+    local built=Zone.Build(snapshot,zones,{hole_cycles=snapshot.hole_cycles,ledger=Fields.NewLedger((snapshot.resources or {}).seeds)})
+    local scheduler=group.scheduler
+    local emitted={};for _,t in ipairs(built.tasks) do emitted[t.id]=true end
+    local changed={}
+    for _,zone in ipairs(zones) do
+        local record=zone.record
+        record.slots=zone.assignment or {}
+        local key=Fields.SettingsKey(zone.settings).."|L"..tostring(record.layout_epoch or 0).."|"..(record.review and "review" or "")
+        if record.config_key and record.config_key~=key then changed[record.id]=true end
+        record.config_key=key
+    end
+    -- Cancel only obsolete preparation/planting: unscoped work of the old
+    -- global controller, work of zones this group no longer manages, work of
+    -- a zone whose plan/layout/review changed, and queued plantings this
+    -- scan no longer funds. Claimed or running plantings finish.
+    local cancellations={}
+    for id,t in pairs(scheduler and scheduler.tasks or {}) do
+        if live(t) and not t.parent_id and (t.kind=="PLANT" or t.kind=="TILL") and not emitted[id]
+            and not (t.continuation and t.continuation.phase=="plowing") then
+            local z=t.data and t.data.zone_id
+            if z==nil or not current[z] or changed[z]
+                or t.kind=="PLANT" and t.state~="claimed" and t.state~="running" then cancellations[#cancellations+1]=id end
+        end
+    end
+    -- An id that comes back (seeds restocked, plan restored) runs again.
+    for _,t in ipairs(built.tasks) do
+        local old=scheduler and scheduler.tasks and scheduler.tasks[t.id]
+        if old and old.state=="cancelled" and (old.reason=="zone_invalidated" or old.reason=="plan_invalidated") then
+            old.state,old.reason,old.retries,old.continuation="pending",nil,0,nil
+        end
+    end
+    local water_tasks,retired={},{}
+    for _,id in ipairs(scheduler and scheduler.order or {}) do
+        local t=scheduler.tasks[id]
+        if t and t.kind=="WATER" and not t.parent_id and live(t) and t.data and t.data.cell then
+            if t.state=="blocked" or water_tasks[t.data.cell] and t.state~="claimed" and t.state~="running" then retired[#retired+1]=id
+            elseif not water_tasks[t.data.cell] then water_tasks[t.data.cell]=id end
+        end
+    end
+    snapshot.water_tasks=water_tasks
+    local tasks,maintenance=self:Maintenance(snapshot,true)
+    for _,t in ipairs(tasks) do emitted[t.id]=true end
+    for _,id in ipairs(retired) do if not emitted[id] then
+        cancellations[#cancellations+1]=id
+        for child,t in pairs(scheduler.tasks) do if t.parent_id==id and live(t) then cancellations[#cancellations+1]=child end end
+    end end
+    for _,t in ipairs(tasks) do
+        local cell=t.data and t.data.cell or t.point and U.CellKey(t.point.x,t.point.z)
+        local z=cell and cellzone[cell]
+        if z then t.data=t.data or {};t.data.zone_id=z end
+    end
+    for _,t in ipairs(built.tasks) do tasks[#tasks+1]=t end
+    for _,t in ipairs(tasks) do t.stage=T.SimpleStage(t) end
+    local reasons,seen={},{}
+    for _,r in ipairs(maintenance.water_reasons or {}) do if not seen[r.code] then seen[r.code]=true;reasons[#reasons+1]=r end end
+    if type(self.inst)=="table" and self.inst.components then
+        for _,code in ipairs({"WATER_MOISTURE_UNKNOWN","WATER_NO_CAN","WATER_CAN_NOT_CARRIED","WATER_NO_SOURCE"}) do
+            if seen[code] then U.OnceTalk(self.inst,"water:"..code,T.Message(code)) else U.ClearTalk(self.inst,"water:"..code) end
+        end
+    end
+    for _,robot in ipairs(group.members or {}) do
+        local resource=type(robot)=="table" and robot.components and robot.components.agriresource
+        local blocked=resource and resource.RecycleBlocked and resource:RecycleBlocked(group)
+        if blocked and not seen[blocked] then seen[blocked]=true;reasons[#reasons+1]={code=blocked} end
+    end
+    for _,r in ipairs(built.reasons) do reasons[#reasons+1]=r end
+    for _,code in ipairs(snapshot.reasons or {}) do reasons[#reasons+1]={code=code} end
+    -- Runtime view for badges, the zone editor and the robot panel list.
+    local view,order={}, {}
+    for zi,zone in ipairs(zones) do
+        local s=built.summaries[zi];local record=zone.record
+        local points={};for _,cell in ipairs(zone.cells) do points[#points+1]=tilecenter(cell) end
+        s.points=points;s.paused=record.paused or nil;s.configured=record.configured or nil
+        s.review=record.review and record.review.reason or nil;s.alternatives=record.review and #(record.review.alternatives or {}) or nil
+        s.revision=record.revision;s.settings=U.Copy(zone.settings);s.distance=zone.distance
+        view[record.id]=s;order[#order+1]=record.id
+    end
+    group.zone_view,group.zone_order,group.zone_stock=view,order,U.Copy((snapshot.resources or {}).seeds or {})
+    local planting=0;for _,t in ipairs(built.tasks) do if t.kind=="PLANT" then planting=planting+1 end end
+    return {status=planting>0 and "ready" or "waiting",tasks=tasks,clusters={},reasons=reasons,cancel_ids=cancellations,
+        recommendations={},viability_failures=maintenance.viability_failures,generated_at=snapshot.now,
+        summary={zones=#zones,new_plants=planting,maintenance=maintenance,source_build=C.SOURCE_BUILD}}
+end
 function AgriPlanner:Plan(group)
     local snapshot=self:Capture(group)
     self.last_snapshot=snapshot
-    if group.settings.simple~=false then return self:PlanSimple(group,snapshot) end
+    if group.settings.simple~=false then
+        if group.zones_enabled then return self:PlanZones(group,snapshot) end
+        return self:PlanSimple(group,snapshot)
+    end
     self.last_snapshot=snapshot
     local config={snapshot.world.season,group.settings.mode,tostring(group.settings.radius),tostring(group.settings.density),tostring(group.settings.allow_random),group.settings.planting or "auto",group.settings.crop or ""}
     local selected=(group.presets or {})[snapshot.world.season] or {}

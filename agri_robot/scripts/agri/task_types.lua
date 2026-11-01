@@ -11,8 +11,9 @@ M.ACTIONS = { TILL = "TILL", PLANT = "PLANTSOIL", FERTILIZE = "DEPLOY_TILEARRIVE
 M.RESOURCE_REASONS = { need_fetch = true, output_full = true, working_inventory_full = true,
     out_of_water = true, no_empty_can = true, missing_seed = true, missing_fertilizer = true,
     missing_tool = true, needs_heat = true, no_water_source = true, no_furnace = true,
-    warehouse_full = true, resources_unavailable = true, no_warehouse = true }
+    warehouse_full = true, resources_unavailable = true, no_warehouse = true, equipment_slot_full = true }
 M.REASONS = {
+    equipment_slot_full = "机器人对应的工具或水壶格已满，请先腾出位置。",
     output_full = "产物空间不足，等待仓库或背包腾出空间。", working_inventory_full = "临时库存未能归还，已暂停等待空间。",
     out_of_water = "水壶缺水，正在准备集中补水。", no_water_source = "范围内没有可用水源。",
     no_furnace = "没有找到可用的龙鳞炉，热能工具已暂停使用。", no_warehouse = "没有可用仓库，请绑定农业仓库。",
@@ -29,7 +30,28 @@ M.REASONS = {
     recycle_warehouse_full = "仓库作物/回收区已满，捡到的耕地机暂留在机器人里。",
     legacy_plow_stuck = "旧工具格里的耕地机没地方放：请腾出工作库存或仓库作物/回收区。",
     NEED_FARMLAND = "农田不够：请手动用耕地机开垦，机器人不会自动耕地。",
+    earlier_stage = "等待前一类农活完成：清理残骸→去除自然坑→耕地→播种→浇水→照料。",
+    zone_paused = "这个田块已暂停，其他田块照常工作。",
+    zone_editing = "玩家正在编辑这个田块，该田块暂停，其他田块照常工作。",
+    zone_invalidated = "田块方案已变化，这项旧的播种/打孔任务已取消。",
+    MISSING_SEEDS = "部分田块种子不足：有种子的作物先种，补货后继续。",
+    ZONE_WITHHELD = "部分孔位暂缓：旁边有作物、自然坑或不可耕作的地面。",
+    ZONE_REVIEW = "田块合并或分割后需要玩家确认方案，确认前不新种。",
 }
+-- Simple work runs category by category across the whole selected farm. The
+-- scheduler gates a staged task while unfinished work of an earlier stage
+-- exists (see AgriScheduler:RefreshReady); tasks without a stage are never
+-- gated and never hold the barrier.
+M.STAGE = { CLEAR = 1, UNSOIL = 2, TILL = 3, PLANT = 4, WATER = 5, TEND = 6 }
+function M.SimpleStage(task)
+    local k,d = task.kind,task.data or {}
+    if k == "CLEAR" then return M.STAGE.CLEAR end
+    if k == "TILL" and d.simple then return d.unsoil and M.STAGE.UNSOIL or M.STAGE.TILL end
+    if k == "PLANT" and d.simple then return M.STAGE.PLANT end
+    if k == "WATER" and d.simple then return M.STAGE.WATER end
+    if k == "TEND" or k == "MUSIC_TEND" then return M.STAGE.TEND end
+    return nil
+end
 function M.Normalize(task)
     task.kind = string.upper(task.kind or "")
     if not M.KINDS[task.kind] or type(task.id) ~= "string" then return nil end

@@ -54,7 +54,7 @@ end
 function AgriWarehouse:GetStatus()
     local container = self.inst.components.container
     local out = { mode = self.mode, groups = {} }
-    for _, name in ipairs({ "seed", "fertilizer", "crop" }) do
+    for _, name in ipairs({ "seed", "fertilizer", "crop", "hoe", "shovel", "hammer", "axe", "pickaxe", "water" }) do
         local lo, hi = S.WarehouseRange(name)
         out.groups[name] = { capacity = hi - lo + 1, free = S.FreeSlots(container, lo, hi) }
     end

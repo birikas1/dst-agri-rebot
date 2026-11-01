@@ -1,5 +1,5 @@
 local C = {
-    VERSION = "0.2.0-simple.5",
+    VERSION = "0.3.0",
     SOURCE_BUILD = 756039,
     SCHEMA_VERSION = 1,
     RADII = { 8, 12, 16, 20, 24 },
@@ -23,9 +23,22 @@ local C = {
     WAREHOUSE_FERTILIZER_SLOTS = 12,
     WAREHOUSE_CROP_SLOTS = 24,
     WAREHOUSE_MODULE_SLOT = 49,
+    -- Append equipment after the legacy49 slots: never shift saved items.
+    WAREHOUSE_TOOL_FIRST = 50,
+    WAREHOUSE_TOOL_LAST = 64,
+    WAREHOUSE_TOOL_PER_KIND = 3,
+    WAREHOUSE_WATER_FIRST = 65,
+    WAREHOUSE_WATER_LAST = 67,
+    WAREHOUSE_SLOTS = 67,
+    TOOL_KEYS = { "hoe", "shovel", "hammer", "axe", "pickaxe" },
     THERMOSTAT_TEMPERATURE = 70,
     SCAN_INTERVAL = 2,
     PLAN_INTERVAL = 10,
+    -- Simple watering latency budget (seconds): a robot crosses the work
+    -- diameter at the agribot walk speed; the overhead covers preemption,
+    -- the interrupted action's busy animation and one native pour.
+    WATER_WALK_SPEED = 4,
+    WATER_ACTION_OVERHEAD = 6,
     EXECUTOR_INTERVAL = 0.5,
     CLAIM_TIMEOUT = 45,
     TASK_TIMEOUT = 40,
@@ -44,6 +57,17 @@ local C = {
     DEFAULT_DENSITY = "9",
     PLAN_MAX_PER_CROP = 64,
     PLAN_MAX_TOTAL = 256,
+    -- Connected farm zones (field_zones / zone HUD).
+    ZONE_LOCK_TIMEOUT = 20,      -- seconds without a ping before an editor lock ends
+    ZONE_EDIT_DISTANCE = 20,     -- player to nearest zone tile centre
+    ZONE_VIEW_EXTRA = 24,        -- list zones of groups within radius + this
+    ZONE_LIST_MAX = 24,          -- badges per list reply
+    ZONE_POINTS_MAX = 48,        -- tile centres per badge (else bounding corners)
+    ZONE_RPC_MAX_BYTES = 4096,   -- client request size
+    ZONE_REPLY_MAX_BYTES = 24000,
+    ZONE_LIST_INTERVAL = 1,      -- minimum seconds between list replies per player
+    ZONE_POLL_INTERVAL = 3,      -- client badge polling period
+    ZONE_PING_INTERVAL = 5,      -- client editor heartbeat
 }
 C.DEFAULT_SETTINGS = {
     running = true, mode = "stable", radius = C.DEFAULT_RADIUS,

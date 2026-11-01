@@ -62,6 +62,8 @@ function M.Category(item)
     if M.IsFertilizer(item) then return "fertilizer" end
     if M.IsCrop(item) then return "crop" end
     if M.IsRecyclable(item) then return "recycle" end
+    if M.IsWateringCan(item) then return "water" end
+    if M.ToolSlot(item) then return "tool" end
     return nil
 end
 
@@ -76,7 +78,24 @@ function M.WarehouseRange(category)
     -- Recycled items share the output area with crops (25..48).
     if category == "crop" or category == "recycle" then return seeds + ferts + 1, seeds + ferts + C.WAREHOUSE_CROP_SLOTS end
     if category == "module" then return C.WAREHOUSE_MODULE_SLOT, C.WAREHOUSE_MODULE_SLOT end
+    if category == "tool" then return C.WAREHOUSE_TOOL_FIRST,C.WAREHOUSE_TOOL_LAST end
+    if category == "water" then return C.WAREHOUSE_WATER_FIRST,C.WAREHOUSE_WATER_LAST end
+    for i,name in ipairs(C.TOOL_KEYS) do
+        if category==name then
+            local lo=C.WAREHOUSE_TOOL_FIRST+(i-1)*C.WAREHOUSE_TOOL_PER_KIND
+            return lo,lo+C.WAREHOUSE_TOOL_PER_KIND-1
+        end
+    end
     return nil, nil
+end
+
+function M.WarehouseEquipmentRange(item)
+    if M.IsWateringCan(item) then return C.WAREHOUSE_WATER_FIRST,C.WAREHOUSE_WATER_LAST end
+    local slot=M.ToolSlot(item)
+    if slot then
+        local lo=C.WAREHOUSE_TOOL_FIRST+(slot-C.TOOL_FIRST)*C.WAREHOUSE_TOOL_PER_KIND
+        return lo,lo+C.WAREHOUSE_TOOL_PER_KIND-1
+    end
 end
 
 function M.WarehouseTest(container, item, slot)
@@ -85,7 +104,8 @@ function M.WarehouseTest(container, item, slot)
     if slot == C.WAREHOUSE_MODULE_SLOT then
         return item.prefab == "bluegem" or item.prefab == "super_preserver_kit"
     end
-    local lo, hi = M.WarehouseRange(M.Category(item))
+    local lo,hi=M.WarehouseEquipmentRange(item)
+    if not lo then lo,hi=M.WarehouseRange(M.Category(item)) end
     if not lo then return false end
     return slot == nil or slot >= lo and slot <= hi
 end
@@ -115,7 +135,7 @@ end
 function M.ToolSlot(item)
     if not item or M.IsRecyclable(item) then return nil end
     if item.components and item.components.farmtiller or item.prefab=="fumarole_farm_hoe" then return 26 end
-    local byprefab={farm_hoe=26,shovel=27,goldenshovel=27,fumaroleshovel=27,hammer=28,fumarolehammer=28,axe=29,goldenaxe=29,fumaroleaxe=29,pickaxe=30,goldenpickaxe=30,fumarolepickaxe=30}
+    local byprefab={farm_hoe=26,golden_farm_hoe=26,shovel=27,goldenshovel=27,fumaroleshovel=27,hammer=28,fumarolehammer=28,axe=29,goldenaxe=29,fumaroleaxe=29,pickaxe=30,goldenpickaxe=30,fumarolepickaxe=30}
     if byprefab[item.prefab] then return byprefab[item.prefab] end
     local tool=item.components and item.components.tool
     if tool and ACTIONS then

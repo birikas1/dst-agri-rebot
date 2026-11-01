@@ -168,7 +168,8 @@ local G={TheWorld=TheWorld,ThePlayer=player,TheFrontEnd={PushScreen=function()en
     GetClientModRPC=function()return 'snapshot'end,GetModRPC=function()return 'intent'end,Ents={},ActionHandler=function()return {}end}
 G.SendModRPCToClient=function(_,_,r,encoded)received[#received+1]={robot=r,data=json.decode(encoded),size=#encoded}end
 G.SendModRPCToServer=function()end
-local env={GLOBAL=G,AddClientModRPCHandler=function(_,n,fn)handlers.client=fn end,AddModRPCHandler=function(_,n,fn)handlers.server=fn end,
+local env={GLOBAL=G,AddClientModRPCHandler=function(_,n,fn)handlers["client_"..n]=fn;if n=="snapshot"then handlers.client=fn end end,
+    AddModRPCHandler=function(_,n,fn)handlers["server_"..n]=fn;if n=="intent"then handlers.server=fn end end,
     AddAction=function(_,_,fn)handlers.action=fn;return {}end,AddComponentAction=function()end,AddStategraphActionHandler=function()end}
 require('agri/network').Register(env)
 local function request(value)handlers.server(player,robot,json.encode(value))end
@@ -333,7 +334,13 @@ test('container registration synchronizes all network slots',function()
     local layouts={params={},MAXITEMSLOTS=12};package.loaded.containers=layouts
     require('agri/containers').Register({GLOBAL={Vector3=function(x,y,z)return {x=x,y=y,z=z}end}})
     assert(#layouts.params.agribot.widget.slotpos==30)
-    assert(#layouts.params.agriwarehouse.widget.slotpos==49 and layouts.MAXITEMSLOTS==49)
+    assert(#layouts.params.agriwarehouse.widget.slotpos==67 and layouts.MAXITEMSLOTS==67)
+    for i,a in ipairs(layouts.params.agriwarehouse.widget.slotpos)do
+        assert(math.abs(a.x)+32<=448 and math.abs(a.y)+32<=342,"warehouse slot outside panel")
+        for j,b in ipairs(layouts.params.agriwarehouse.widget.slotpos)do
+            if i<j then assert(math.abs(a.x-b.x)>=64 or math.abs(a.y-b.y)>=64,"warehouse slots overlap")end
+        end
+    end
     assert(layouts.params.agriwarehouse.openlimit==1 and layouts.params.agribot.openlimit==1)
 end)
 test('lunar forging kit remains tied to crafting station',function()

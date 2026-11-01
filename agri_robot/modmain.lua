@@ -1,8 +1,12 @@
-PrefabFiles = { "agribot", "agriwarehouse", "super_preserver_kit", "scale_thermostat_module" }
+PrefabFiles = { "agribot", "agriworkcenter", "agriwarehouse", "agriwell", "super_preserver_kit", "scale_thermostat_module" }
 local G = GLOBAL
 local C = require("agri/constants")
 G.STRINGS.NAMES.AGRIBOT = "农业机器人"
+G.STRINGS.NAMES.AGRIWORKCENTER = "农业工作中心"
+G.STRINGS.CHARACTERS.GENERIC.DESCRIBE.AGRIWORKCENTER = "这里是机器人的固定工作中心。鼠标放上去可以查看工作范围。"
 G.STRINGS.NAMES.AGRIWAREHOUSE = "农业仓库"
+G.STRINGS.NAMES.AGRIWELL = "水井"
+G.STRINGS.CHARACTERS.GENERIC.DESCRIBE.AGRIWELL = "机器人可以来这里打水，再去照顾农田。"
 G.STRINGS.NAMES.SUPER_PRESERVER_KIT = "超级保鲜套件"
 G.STRINGS.NAMES.SCALE_THERMOSTAT_MODULE = "龙鳞恒温模块"
 G.STRINGS.RECIPE_DESC.AGRIBOT = "带上真实工具，一起照料田地。"
@@ -40,4 +44,11 @@ AddPrefabPostInit("world", function(inst)
 end)
 
 require("agri/network").Register(env)
+-- Client zone badges and the zone plan editor (world-anchored HUD, kept
+-- behind the regular HUD so inventory and crafting stay on top).
+AddClassPostConstruct("widgets/controls", function(self)
+    local ZoneHud = require("widgets/agrizonehud")
+    self.agri_zone_hud = self:AddChild(ZoneHud(self.owner))
+    self.agri_zone_hud:MoveToBack()
+end)
 if GetModConfigData("debug_log") then print("[AgriRobot] " .. C.VERSION .. " / source ledger build " .. C.SOURCE_BUILD) end

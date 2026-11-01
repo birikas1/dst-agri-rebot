@@ -1,7 +1,7 @@
 name = "田间管家 · 自动农业机器人"
-description = "使用真实种子、工具、水和肥料的自动农业机器人。按“密度 + 种植方案”在已有农田上自动打孔、播种、照料和收获；农田需手动开垦，地上的耕地机会被回收进仓库。测试版：请先在测试世界验证。\n\nAI 协作开发：GPT/Codex 与 Claude。\nAI-assisted development: GPT/Codex & Claude.\nGitHub: https://github.com/birikas1/dst-agri-rebot"
+description = "田间管家0.3.0正式版。相连农田独立配置比例或精确种植方案，支持孔数上限、固定工作中心与范围预览。机器人使用真实种子、工具和水，自动打孔、播种、浇水、照料、收获和入库；仓库提供67个分类槽位，工具及水壶可自动取用。新增水井，支持自动打水。农田需手动开垦。\n\nAI 协作开发：GPT/Codex 与 Claude。\nAI-assisted development: GPT/Codex & Claude.\nGitHub: https://github.com/birikas1/dst-agri-rebot"
 author = "birikas1 · GPT/Codex & Claude"
-version = "0.2.0-simple.5"
+version = "0.3.0"
 api_version = 10
 dst_compatible = true
 dont_starve_compatible = false

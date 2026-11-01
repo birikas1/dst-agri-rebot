@@ -1,5 +1,6 @@
 local C = require("agri/constants")
 local U = require("agri/util")
+local Fields = require("agri/field_zones")
 
 local function now() return GetTime() end
 local function position(inst)
@@ -27,6 +28,9 @@ end
 local AgriFarmGroup = Class(function(self, inst)
     self.inst = inst
     self.groups, self.locks, self.inventory_holds = {}, {}, {}
+    -- World zone registry: plans outlive groups, robots and scans.
+    self.zones = { records = {}, next_id = 1 }
+    self.zone_locks, self.zone_budget = {}, {}
     self.next_order, self.next_group = 1, 1
     self.metrics = { planner_recomputes = 0, group_ticks = 0 }
     self._task = inst:DoPeriodicTask(C.SCAN_INTERVAL, function() self:Tick() end)
@@ -42,12 +46,36 @@ function AgriFarmGroup:NewGroup(robot, id)
     id = id or ("farm_" .. tostring(self.next_group))
     self.next_group = self.next_group + 1
     local group = {
-        id = id, members = {}, primary = nil, center = position(robot),
+        id = id, members = {}, primary = nil, center = U.Copy(robot._agri_build_origin or position(robot)),
         settings = U.Settings(), presets = {}, blueprint = { cells = {}, visible = true, confirmed = false },
         dirty = true, revision = 1, created = now(), last_plan = -C.PLAN_INTERVAL,
     }
+    self:EnableZones(group)
     self.groups[id] = group
     return group
+end
+-- Every real group (new or loaded) manages connected farm zones.
+function AgriFarmGroup:EnableZones(group)
+    group.zones_enabled = true
+    group.zone_store, group.zone_registry = self.zones, self
+    group.zone_holds = group.zone_holds or {}
+end
+
+function AgriFarmGroup:RefreshWorkCenter(group)
+    if not group then return end
+    if not group.primary then
+        if U.Valid(group.workcenter) then group.workcenter:Remove() end
+        group.workcenter=nil
+        return
+    end
+    if not U.Valid(group.workcenter) then group.workcenter=SpawnPrefab("agriworkcenter") end
+    local marker=group.workcenter
+    if marker then
+        marker.Transform:SetPosition(group.center.x,0,group.center.z)
+        marker._agri_radius:set(group.settings.radius)
+        marker._agri_order:set(group.placement_order or 0)
+        marker._agri_group:set(group.id)
+    end
 end
 
 function AgriFarmGroup:SelectPrimary(group)
@@ -80,6 +108,7 @@ function AgriFarmGroup:SelectPrimary(group)
             if member._agri_groupnet then member._agri_groupnet:set(group.id) end
         end
     end
+    self:RefreshWorkCenter(group)
     if old ~= group.primary then self:MarkDirty(group, "primary_changed") end
 end
 
@@ -93,6 +122,7 @@ function AgriFarmGroup:Register(robot, saved)
     robot._agri_order = saved.placement_order or robot._agri_order or self.next_order
     self.next_order = math.max(self.next_order, robot._agri_order + 1)
     robot._agri_personal_settings = U.Settings(saved.personal_settings or robot._agri_personal_settings)
+    robot._agri_build_origin=U.Copy(saved.origin or robot._agri_build_origin or position(robot))
     local saved_id = saved.group_id or robot._agri_group_id
     local group = saved_id and self.groups[saved_id] or nil
     if not group then
@@ -213,13 +243,232 @@ function AgriFarmGroup:ReleasePlayer(player)
         if lock.player == player or (type(player)=="string" and lock.userid==player) then self.locks[id] = nil end
     end
     for key,hold in pairs(self.inventory_holds) do if hold.player==player or type(player)=="string" and hold.player.userid==player then self.inventory_holds[key]=nil end end
-    for _,group in pairs(self.groups) do self:RefreshEditing(group) end
+    local userid=type(player)=="string" and player or type(player)=="table" and player.userid or nil
+    for zid,lock in pairs(self.zone_locks) do
+        if lock.player==player or userid~=nil and lock.userid==userid then self.zone_locks[zid]=nil end
+    end
+    if userid then self.zone_budget[userid]=nil end
+    for _,group in pairs(self.groups) do self:RefreshEditing(group);self:ApplyZoneHolds(group) end
+end
+
+-- Zones ----------------------------------------------------------------------
+-- A record seen recently by another live group stays with that group, so two
+-- overlapping groups never plan the same zone twice.
+function AgriFarmGroup:ZoneForeign(record,group,time)
+    local owner=record and record.group_id
+    if not owner or owner==group.id then return false end
+    local other=self.groups[owner]
+    if not other or #other.members==0 then return false end
+    return record.last_seen~=nil and (time or now())-record.last_seen<C.PLAN_INTERVAL*3
+end
+local function lockalive(lock) return lock~=nil and lock.expires>now() end
+function AgriFarmGroup:ZoneHolds(group)
+    -- All records this group owns (bounded by Fields.MAX_RECORDS), so tasks
+    -- restored from a save are held before the first plan after loading.
+    local holds={}
+    for zid,record in pairs(self.zones.records) do
+        if record.group_id==group.id and not record.gone then
+            if lockalive(self.zone_locks[zid]) then holds[zid]="zone_editing"
+            elseif record.paused then holds[zid]="zone_paused" end
+        end
+    end
+    return holds
+end
+-- Holds pause only the held zone's work; robots on other zones continue.
+function AgriFarmGroup:ApplyZoneHolds(group)
+    if not group or not group.zones_enabled then return end
+    group.zone_holds=self:ZoneHolds(group)
+    local scheduler=group.scheduler
+    if not (scheduler and scheduler.ZoneHeld) then return end
+    for _,robot in ipairs(group.members) do
+        local current=scheduler.Current and scheduler:Current(robot)
+        local held=current and scheduler:ZoneHeld(current)
+        if held then scheduler:Pause(robot,held) end
+    end
+    if scheduler.RefreshReady then scheduler:RefreshReady() end
+end
+-- Server-side access check for one zone: a living, connected player near
+-- the zone's ground, and a live group that currently manages the zone.
+function AgriFarmGroup:ZoneAccess(player,zid)
+    if not U.Valid(player) or type(player.userid)~="string" or player.userid=="" or player:HasTag("playerghost") then
+        return nil,nil,"玩家状态无效"
+    end
+    if type(zid)~="string" or #zid>16 then return nil,nil,"田块无效" end
+    local record=self.zones.records[zid]
+    if not record or record.gone then return nil,nil,"田块不存在" end
+    local group=record.group_id and self.groups[record.group_id]
+    local view=group and group.zone_view and group.zone_view[zid]
+    if not group or #group.members==0 or not view then return nil,nil,"田块不在机器人的工作范围内" end
+    local p,near=position(player),false
+    for _,point in ipairs(view.points or {}) do
+        if U.DistanceSq(p,point)<=C.ZONE_EDIT_DISTANCE*C.ZONE_EDIT_DISTANCE then near=true;break end
+    end
+    if not near then return nil,nil,"距离田块太远" end
+    return record,group
+end
+function AgriFarmGroup:AcquireZoneLock(player,zid)
+    local record,group,why=self:ZoneAccess(player,zid)
+    if not record then return false,why end
+    local lock=self.zone_locks[zid]
+    if lockalive(lock) and lock.userid~=player.userid then return false,"另一位玩家正在编辑这个田块" end
+    -- One expanded editor per player: opening a zone closes the previous one.
+    for other,held in pairs(self.zone_locks) do
+        if other~=zid and held.userid==player.userid then
+            self.zone_locks[other]=nil
+            local r=self.zones.records[other];self:ApplyZoneHolds(r and self.groups[r.group_id or ""])
+        end
+    end
+    local fresh=not (lockalive(lock) and lock.userid==player.userid)
+    self.zone_locks[zid]={userid=player.userid,player=player,expires=now()+C.ZONE_LOCK_TIMEOUT,group_id=group.id}
+    if fresh then self:ApplyZoneHolds(group) end
+    return true
+end
+function AgriFarmGroup:HasZoneLock(player,zid)
+    local lock=type(zid)=="string" and self.zone_locks[zid]
+    if not lockalive(lock) or not U.Valid(player) or lock.userid~=player.userid then return false end
+    return self:ZoneAccess(player,zid)~=nil
+end
+function AgriFarmGroup:ReleaseZoneLock(player,zid)
+    local lock=type(zid)=="string" and self.zone_locks[zid]
+    if lock and (player==nil or U.Valid(player) and lock.userid==player.userid) then
+        self.zone_locks[zid]=nil
+        local record=self.zones.records[zid]
+        self:ApplyZoneHolds(record and self.groups[record.group_id or ""])
+        return true
+    end
+    return false
+end
+local function crop_ok()
+    local crops={}
+    for key,def in pairs(require("agri/source_adapter").GetCropDefs()) do if not def.is_randomseed then crops[key]=true end end
+    return crops
+end
+-- Edits need this player's live zone lock and the current zone revision.
+-- action: "save" (data=settings), "pause"/"resume", "template" (back to
+-- the group's default ratio template). Returns ok, reason, stale.
+function AgriFarmGroup:UpdateZone(player,zid,revision,action,data)
+    if not self:HasZoneLock(player,zid) then return false,"编辑锁已失效，请重新打开田块" end
+    local record,group=self:ZoneAccess(player,zid)
+    if not record then return false,"田块不存在" end
+    if not U.Finite(revision) or revision%1~=0 or revision~=record.revision then return false,"田块方案已被更新，已刷新为最新内容",true end
+    if action=="save" then
+        local clean,why=Fields.Clean(data,crop_ok())
+        if not clean then return false,why end
+        local fits,reason=Fields.CheckCapacity(clean,#record.tiles)
+        if not fits then return false,reason end
+        record.settings,record.configured,record.review=clean,true,nil
+    elseif action=="pause" or action=="resume" then
+        record.paused=action=="pause"
+    elseif action=="template" then
+        local fits,reason=Fields.CheckCapacity(Fields.Template(group.settings),#record.tiles)
+        if not fits then return false,"默认模板超出此田块容量："..reason end
+        record.settings,record.configured,record.review=nil,false,nil
+    else return false,"未知操作" end
+    record.revision=record.revision+1
+    -- Extend the lock on every accepted edit; holds follow the new state.
+    self.zone_locks[zid].expires=now()+C.ZONE_LOCK_TIMEOUT
+    self:ApplyZoneHolds(group)
+    self:MarkDirty(group,"zone_settings")
+    return true
+end
+local function zonestate(self,zid,view)
+    if lockalive(self.zone_locks[zid]) then return "editing" end
+    if view.paused then return "paused" end
+    if view.review then return "review" end
+    if view.unsafe then return "unsafe" end
+    if view.empty then return "empty" end
+    return "ok"
+end
+local function round1(n) return math.floor(n*10+.5)/10 end
+-- Compact read-only badge entry (no entities, bounded size).
+function AgriFarmGroup:ZoneBadge(zid,view)
+    local pts={}
+    local points=view.points or {}
+    if #points>C.ZONE_POINTS_MAX then
+        local minx,maxx,minz,maxz=math.huge,-math.huge,math.huge,-math.huge
+        for _,p in ipairs(points) do minx,maxx,minz,maxz=math.min(minx,p.x),math.max(maxx,p.x),math.min(minz,p.z),math.max(maxz,p.z) end
+        points={{x=minx,z=minz},{x=maxx,z=minz},{x=minx,z=maxz},{x=maxx,z=maxz}}
+    end
+    for _,p in ipairs(points) do pts[#pts+1]=round1(p.x);pts[#pts+1]=round1(p.z) end
+    -- Plan progress over the untrimmed targets: tt = planned plants, td =
+    -- plants of a planned crop, each crop capped at its target, so kept
+    -- off-plan plants never show progress like 32/8.
+    local crops,tt,td={},0,0
+    for _,crop in ipairs(U.Keys(view.targets)) do
+        local target=tonumber(view.targets[crop]) or 0
+        local have=tonumber((view.have or {})[crop]) or 0
+        tt=tt+target;td=td+math.max(0,math.min(have,target))
+        crops[#crops+1]={c=crop,n=view.targets[crop],h=(view.have or {})[crop] or 0}
+    end
+    table.sort(crops,function(a,b) if a.n~=b.n then return a.n>b.n end return a.c<b.c end)
+    while #crops>6 do crops[#crops]=nil end
+    return {id=zid,rev=view.revision,pts=pts,n=view.tiles,d=view.density,m=view.mode,nom=view.nominal,use=view.usable,
+        wh=view.withheld,pl=view.planted,tt=tt,td=td,tg=crops,miss=view.missing_total,st=zonestate(self,zid,view),cf=view.configured==true}
+end
+-- Read-only zone list for one player: zones of live groups near the player.
+-- Never takes a lock, never pauses work, never changes settings.
+function AgriFarmGroup:ZoneList(player)
+    if not U.Valid(player) or player:HasTag("playerghost") then return {} end
+    local p,out=position(player),{}
+    for _,id in ipairs(U.Keys(self.groups)) do
+        local group=self.groups[id]
+        local reach=(group.settings.radius or C.DEFAULT_RADIUS)+C.ZONE_VIEW_EXTRA
+        if #group.members>0 and group.zone_view and U.DistanceSq(p,group.center)<=reach*reach then
+            for _,zid in ipairs(group.zone_order or {}) do
+                local view=group.zone_view[zid]
+                if view then
+                    local best=math.huge
+                    for _,q in ipairs(view.points or {}) do best=math.min(best,U.DistanceSq(p,q)) end
+                    out[#out+1]={distance=best,badge=self:ZoneBadge(zid,view)}
+                end
+            end
+        end
+    end
+    table.sort(out,function(a,b) if a.distance~=b.distance then return a.distance<b.distance end return Fields.IdLess(a.badge.id,b.badge.id) end)
+    local list={}
+    for i=1,math.min(#out,C.ZONE_LIST_MAX) do list[i]=out[i].badge end
+    return list
+end
+-- Editor payload for a zone the player holds the lock of.
+function AgriFarmGroup:ZoneDetail(zid,group)
+    local record=self.zones.records[zid]
+    local view=group and group.zone_view and group.zone_view[zid]
+    if not record or not view then return nil end
+    local detail=self:ZoneBadge(zid,view)
+    detail.rev=record.revision
+    -- The editor's own lock is not news to the editor: show the zone state.
+    detail.st=record.paused and "paused" or record.review and "review" or view.unsafe and "unsafe" or view.empty and "empty" or "ok"
+    detail.paused=record.paused==true
+    detail.configured=record.configured==true
+    detail.settings=public(Fields.Effective(record,Fields.Template(group.settings)))
+    detail.template=public(Fields.Template(group.settings))
+    detail.targets=public(view.targets);detail.have=public(view.have);detail.missing=public(view.missing)
+    detail.spacing_lost=view.spacing_lost;detail.unsafe=view.unsafe;detail.offgrid=view.offgrid
+    detail.over=view.over_capacity;detail.requested=view.requested
+    detail.withheld_reasons=public(view.withheld_reasons)
+    if record.review then
+        detail.review={reason=record.review.reason,alternatives={}}
+        for _,a in ipairs(record.review.alternatives or {}) do detail.review.alternatives[#detail.review.alternatives+1]={from=a.from,settings=public(a.settings)} end
+    end
+    local stock={}
+    for seed,n in pairs(group.zone_stock or {}) do if type(n)=="number" and n>0 then stock[seed]=n end end
+    detail.stock=stock
+    local crops={}
+    for key,def in pairs(require("agri/source_adapter").GetCropDefs()) do
+        if not def.is_randomseed then crops[#crops+1]={id=key,seed=def.seed,product=def.product} end
+    end
+    table.sort(crops,function(a,b)return a.id<b.id end)
+    crops[#crops+1]={id="randomseed",seed="seeds",random=true}
+    detail.crops=crops
+    detail.edit_distance=C.ZONE_EDIT_DISTANCE
+    return detail
 end
 
 function AgriFarmGroup:UpdateSettings(group, data)
     local settings = U.Copy(group.settings)
     for key, value in pairs(data or {}) do settings[key] = value end
     group.settings = U.Settings(settings)
+    self:RefreshWorkCenter(group)
     group.revision = group.revision + 1
     self:MarkDirty(group, "settings")
 end
@@ -253,7 +502,18 @@ function AgriFarmGroup:Snapshot(group, player)
     end
     stats.issues=#(group.blueprint.warnings or {})
     local scheduler = group.scheduler
+    -- Zone groups: the robot panel lists the zones and edits only the
+    -- default ratio template; per-zone plans live in the zone editor.
+    local zones
+    if group.zones_enabled then
+        zones={}
+        for _,zid in ipairs(group.zone_order or {}) do
+            local view=group.zone_view and group.zone_view[zid]
+            if view and #zones<C.ZONE_LIST_MAX then zones[#zones+1]=self:ZoneBadge(zid,view) end
+        end
+    end
     return {
+        zones_enabled=group.zones_enabled==true,zones=zones,
         version=C.VERSION, group_id=group.id, revision=group.revision, settings=public(group.settings),editing=group.editing==true,
         center=public(group.center), members=memberinfo, blueprint=public(group.blueprint), presets=public(group.presets),
         warehouse=U.Valid(group.warehouse) and {guid=group.warehouse.GUID,point=position(group.warehouse)} or nil,
@@ -271,9 +531,14 @@ function AgriFarmGroup:Tick()
     for id, lock in pairs(self.locks) do
         if lock.expires <= now() or not self:CanEdit(lock.player,lock.robot) then self.locks[id] = nil end
     end
+    -- Zone edit locks expire (no heartbeat), or end with the player's access.
+    for zid, lock in pairs(self.zone_locks) do
+        if not lockalive(lock) or not U.Valid(lock.player) or self:ZoneAccess(lock.player,zid)==nil then self.zone_locks[zid] = nil end
+    end
     for _, group in pairs(self.groups) do
         self:SelectPrimary(group)
         self:RefreshEditing(group)
+        self:ApplyZoneHolds(group)
         local primary = group.primary
         if primary then
             if not U.Valid(group.warehouse) then
@@ -298,6 +563,7 @@ function AgriFarmGroup:Tick()
                     group.planner_error = nil
                     group.plan = result
                     if group.scheduler and group.scheduler.SetPlan then group.scheduler:SetPlan(result,group) end
+                    self:ApplyZoneHolds(group)
                     U.ClearTalk(primary,"planner_error")
                 else
                     group.planner_error = true
@@ -314,7 +580,8 @@ function AgriFarmGroup:Tick()
 end
 
 function AgriFarmGroup:OnSave()
-    local data = {schema_version=C.SCHEMA_VERSION,next_order=self.next_order,next_group=self.next_group,groups={}}
+    local data = {schema_version=C.SCHEMA_VERSION,next_order=self.next_order,next_group=self.next_group,groups={},
+        zones=Fields.SaveStore(self.zones)}
     local refs, used = {}, {}
     local function ref(inst)
         if U.Valid(inst) and not used[inst.GUID] then used[inst.GUID]=true; refs[#refs+1]=inst.GUID end
@@ -343,6 +610,9 @@ function AgriFarmGroup:OnLoad(data)
     if type(data)~="table" then return end
     self.next_order = tonumber(data.next_order) or 1
     self.next_group = tonumber(data.next_group) or 1
+    -- Saves before zones have no registry: zones start empty and the old
+    -- global crop plan stays in settings.plan as the default ratio template.
+    self.zones = Fields.LoadStore(data.zones)
     self._load_groups = data.groups or {}
     for _, saved in ipairs(self._load_groups) do
         if type(saved.id)=="string" then
@@ -352,6 +622,7 @@ function AgriFarmGroup:OnLoad(data)
                 revision=saved.revision or 1,dirty=true,last_plan=-C.PLAN_INTERVAL,plan=saved.plan,hole_cycles=saved.hole_cycles or {},
                 planner_epoch=saved.planner_epoch,planner_config=saved.planner_config,
                 single_round_started=saved.single_round_started,last_continuous=saved.last_continuous}
+            self:EnableZones(self.groups[saved.id])
         end
     end
 end

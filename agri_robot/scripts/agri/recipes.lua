@@ -3,12 +3,13 @@ function M.Register(env)
     local G = env.GLOBAL or env
     local I, TECH = G.Ingredient, G.TECH
     local names = {
-        AGRIBOT = "农业机器人", AGRIWAREHOUSE = "农业仓库",
+        AGRIBOT = "农业机器人", AGRIWAREHOUSE = "农业仓库", AGRIWELL = "水井",
         SUPER_PRESERVER_KIT = "超级保鲜套件", SCALE_THERMOSTAT_MODULE = "龙鳞恒温模块",
     }
     local descriptions = {
         AGRIBOT = "用真实工具照顾一片农田。",
-        AGRIWAREHOUSE = "种子、肥料与作物各归其位。",
+        AGRIWAREHOUSE = "种子、肥料、作物和备用工具各归其位。",
+        AGRIWELL = "固定淡水源，供机器人和水壶补水。",
         SUPER_PRESERVER_KIT = "让农业仓库使用极地熊獾箱保鲜机制。",
         SCALE_THERMOSTAT_MODULE = "将机器人持有的热能工具维持在70°C。",
     }
@@ -25,9 +26,11 @@ function M.Register(env)
         env.AddRecipe2(name, ingredients, tech, config, filters or { "GARDENING" })
     end
     add("agribot", { I("gears", 2), I("boards", 3), I("goldnugget", 4) },
-        TECH.SCIENCE_ONE, "gears", { placer = "agribot_placer" })
-    add("agriwarehouse", { I("boards", 8) }, TECH.SCIENCE_ONE, "treasurechest",
+        TECH.SCIENCE_ONE, "winona_storage_robot", { placer = "agribot_placer" })
+    add("agriwarehouse", { I("boards", 8) }, TECH.SCIENCE_ONE, "treasurechest_cotl_basic",
         { placer = "agriwarehouse_placer", min_spacing = 1.5 })
+    add("agriwell", { I("cutstone", 6), I("boards", 4), I("rope", 2) }, TECH.SCIENCE_ONE, "agriwell",
+        { placer="agriwell_placer", min_spacing=2, atlas="images/inventoryimages/agriwell.xml" })
     add("super_preserver_kit", { I("bearger_fur", 2), I("lunarplant_husk", 2), I("purebrilliance", 2), I("moonrocknugget", 8) },
         TECH.LUNARFORGING_TWO, "bearger_fur", { nounlock = true, station_tag = "lunar_forge" })
     add("scale_thermostat_module", { I("dragon_scales", 1), I("gears", 2) },

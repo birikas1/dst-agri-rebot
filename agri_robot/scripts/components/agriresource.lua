@@ -3,6 +3,13 @@ local S = require("agri/storage")
 local T = require("agri/task_types")
 local U = require("agri/util")
 local function kind(task) return string.upper(task and task.kind or "") end
+local function equipmentrequest(task)
+    local k=kind(task)
+    if k~="TILL" and k~="HAMMER" and k~="CLEAR" and k~="WATER" and k~="REFILL" and k~="HEAT" then return nil end
+    local d=task.data or {}
+    return {kind=k,prefab=task.prefab,data={can_guid=d.can_guid,item_guid=d.item_guid,
+        tool_action=d.tool_action,action=type(d.action)=="table" and d.action.id or d.action}}
+end
 local function uses(item)
     local finite = item.components and item.components.finiteuses
     return finite and finite:GetUses() or S.Count(item)
@@ -111,7 +118,7 @@ function AgriResource:Snapshot(group)
             local wetness = item.components.wateryprotection and item.components.wateryprotection.addwetness or 0
             out.water.uses, out.water.capacity = out.water.uses + n, out.water.capacity + max
             if wetness > 0 and (out.water.per_use == 0 or wetness < out.water.per_use) then out.water.per_use = wetness end
-            -- WATER only borrows a robot's own can; a warehouse can is reported, not used.
+            -- Stored cans are available via a real FETCH trip before use.
             out.water.cans[#out.water.cans + 1] = { guid = item.GUID, prefab = item.prefab, uses = n, capacity = max, addwetness = wetness, carried = not stored }
         end
         if item.components.farmtiller or item.prefab == "fumarole_farm_hoe" then addtool("hoe", item) end
@@ -143,13 +150,7 @@ function AgriResource:Snapshot(group)
     if group and group.center then x, z = group.center.x, group.center.z end
     local sources = TheSim:FindEntities(x, 0, z, group and group.settings.radius or C.DEFAULT_RADIUS,
         { "watersource" }, { "INLIMBO" })
-    local nearest, nearest_distance
-    for _, source in ipairs(sources) do
-        if source.components.watersource then
-            local distance = self.inst:GetDistanceSqToInst(source)
-            if not nearest_distance or distance < nearest_distance then nearest, nearest_distance = source, distance end
-        end
-    end
+    local nearest=require("agri/water_sources").Pick(sources,self.inst)
     out.water.source, out.water.has_source = nearest, nearest ~= nil
     out.space.output_blocked = out.space.robot_free == 0 and out.space.warehouse_free == 0
     return out
@@ -160,25 +161,126 @@ function AgriResource:CanUnload(group)
     return S.Valid(warehouse) and warehouse.components.container ~= nil and self.inst:GetDistanceSqToInst(warehouse) <= 16
 end
 
-function AgriResource:Demand(group, task)
-    local needs = { seeds = {}, fertilizers = {} }
-    local considered = 0
-    for _, entry in ipairs(group and group.plan and group.plan.tasks or {}) do
-        local live = group.scheduler and group.scheduler.tasks[entry.id]
+local function needcategory(task)
+    local k = kind(task)
+    return k == "PLANT" and "seeds" or k == "FERTILIZE" and "fertilizers" or nil
+end
+local function holder(scheduler, id, live)
+    local claims = scheduler and scheduler.claims
+    local claim = id ~= nil and claims and claims.Get and claims:Get(id)
+    if claim then return claim.owner end
+    return type(live.owner) == "table" and live.owner.GUID or nil
+end
+-- Live planting/fertilizing work, once per stable id: the current plan first,
+-- then scheduler tasks an older scan created that a fresh plan omitted
+-- (a transient blocker, a suspended parent, a rescan during logistics).
+-- Terminal, orphaned and non-resource-blocked stale work holds nothing.
+local function demandentries(group)
+    local out, seen = {}, {}
+    local scheduler = group and group.scheduler
+    local tasks = scheduler and scheduler.tasks or {}
+    local function add(id, entry, live, planned)
+        if id ~= nil then
+            if seen[id] then return end
+            seen[id] = true
+        end
+        local into = needcategory(live and live.kind and live or entry)
+        local prefab = live and live.prefab or entry.prefab
         local state = live and live.state or entry.state
-        if not T.TERMINAL[state] and state ~= "done" and entry.prefab then
-            local k = kind(entry)
-            local into = k == "PLANT" and needs.seeds or k == "FERTILIZE" and needs.fertilizers
-            if into then
-                into[entry.prefab] = (into[entry.prefab] or 0) + (entry.count or 1)
-                considered = considered + 1
-                if considered >= C.WORK_SLOTS * 2 then break end
+        if not into or not prefab or T.TERMINAL[state] or state == "done" then return end
+        if live and scheduler.Orphaned and scheduler:Orphaned(live) then return end
+        -- Work of a zone the player paused or is editing (group.zone_holds)
+        -- reserves nothing, so it cannot exhaust another zone's batch. Only
+        -- these intentional holds count: priority-paused parents and P2
+        -- suspended work keep their seeds.
+        local holds = group and group.zone_holds
+        if holds and next(holds) ~= nil then
+            local zone
+            if live and scheduler.ZoneOf then zone = scheduler:ZoneOf(live)
+            else zone = (entry.data or {}).zone_id end
+            if zone ~= nil and holds[zone] then return end
+        end
+        local owner = live and holder(scheduler, id, live)
+        if state == "blocked" and not planned and not owner and not T.RESOURCE_REASONS[live and live.reason or entry.reason] then return end
+        local count = (live and live.count or entry.count or 1) - (live and live.count_done or 0)
+        if count > 0 then
+            out[#out + 1] = { id = id, category = into, prefab = prefab, count = count, owner = owner, runnable = state ~= "blocked" }
+        end
+    end
+    for _, entry in ipairs(group and group.plan and group.plan.tasks or {}) do
+        add(entry.id, entry, entry.id ~= nil and tasks[entry.id] or nil, true)
+    end
+    local order = scheduler and scheduler.order
+    if not order then
+        order = {}
+        for id in pairs(tasks) do if type(id) == "string" then order[#order + 1] = id end end
+        table.sort(order)
+    end
+    for _, id in ipairs(order) do
+        local live = tasks[id]
+        if live and live.kind then add(id, live, live, scheduler.plan_ids and scheduler.plan_ids[id]) end
+    end
+    return out
+end
+
+-- Seeds and fertilizers this robot should hold for live work.
+-- Without retain: a bounded FETCH batch that always starts with the requested
+-- task (reported as needs.primary) and skips blocked work. With retain: what
+-- UNLOAD keeps, every live job without the batch cutoff. Work claimed by
+-- another robot is that robot's; unclaimed work is first covered by what the
+-- other robots carry beyond their own claims (for retention only those listed
+-- before this one), so the group never counts the same stock twice.
+function AgriResource:Demand(group, task, retain)
+    local equipment=not retain and equipmentrequest(task)
+    if equipment then return {equipment_task=equipment,seeds={},fertilizers={}} end
+    local own, pool = { seeds = {}, fertilizers = {} }, { seeds = {}, fertilizers = {} }
+    local me = self.inst and self.inst.GUID
+    local entries = demandentries(group)
+    local claimed, considered = {}, 0
+    local primary = task and task.prefab and needcategory(task)
+    if primary then
+        local count = math.max(1, (task.count or 1) - (task.count_done or 0))
+        own[primary][task.prefab] = count
+        primary = { category = primary, prefab = task.prefab, count = count }
+        considered = 1
+    end
+    for _, entry in ipairs(entries) do
+        if entry.owner ~= nil then
+            local by = claimed[entry.owner] or { seeds = {}, fertilizers = {} }
+            by[entry.category][entry.prefab] = (by[entry.category][entry.prefab] or 0) + entry.count
+            claimed[entry.owner] = by
+        end
+        local current = task and entry.id ~= nil and entry.id == task.id
+        local mine = me ~= nil and entry.owner == me
+        if not current and (mine or entry.owner == nil or me == nil)
+            and (retain or entry.runnable and considered < C.WORK_SLOTS * 2) then
+            local into = (mine and own or pool)[entry.category]
+            into[entry.prefab] = (into[entry.prefab] or 0) + entry.count
+            considered = considered + 1
+        end
+    end
+    if me ~= nil then
+        for _, robot in ipairs(group and group.members or {}) do
+            if robot == self.inst then
+                if retain then break end
+            elseif S.Valid(robot) and robot.components and robot.components.agriresource then
+                local resource, by = robot.components.agriresource, claimed[robot.GUID]
+                for category, prefabs in pairs(pool) do
+                    for prefab, amount in pairs(prefabs) do
+                        local spare = resource:CountPrefab(prefab, category == "fertilizers") - (by and by[category][prefab] or 0)
+                        if spare > 0 then prefabs[prefab] = math.max(0, amount - spare) end
+                    end
+                end
             end
         end
     end
-    if task and task.prefab then
-        local into = kind(task) == "PLANT" and needs.seeds or kind(task) == "FERTILIZE" and needs.fertilizers
-        if into then into[task.prefab] = math.max(into[task.prefab] or 0, task.count or 1) end
+    local needs = { seeds = {}, fertilizers = {}, primary = primary }
+    for _, category in ipairs({ "seeds", "fertilizers" }) do
+        for _, source in ipairs({ own[category], pool[category] }) do
+            for prefab, amount in pairs(source) do
+                if amount > 0 then needs[category][prefab] = (needs[category][prefab] or 0) + amount end
+            end
+        end
     end
     return needs
 end
@@ -191,11 +293,59 @@ function AgriResource:CountPrefab(prefab, actionuses)
     return n
 end
 
+-- Whether the bound warehouse holds the task's input right now (true when
+-- there is no readable warehouse, so the executor reports that instead).
+function AgriResource:WarehouseStocks(group, task)
+    local warehouse = group and group.warehouse
+    local container = S.Valid(warehouse) and warehouse.components and warehouse.components.container
+    if not container then return true end
+    local k = kind(task)
+    for _, entry in ipairs(S.Items(container)) do
+        local item = entry.item
+        if item.prefab == task.prefab and (k == "PLANT" and S.IsSeed(item) or k == "FERTILIZE" and uses(item) > 0) then return true end
+    end
+    return false
+end
+
 function AgriResource:Fetch(group, requirements)
     if not self:CanUnload(group) then return false, "need_fetch" end
     local source, dest = group.warehouse.components.container, self.inst.components.container
     local needs = requirements or self:Demand(group)
-    local complete = true
+    if needs.equipment_task then
+        local request=needs.equipment_task
+        if self:FindSuppliedEquipment(request) then return true end
+        local item=self:FindWarehouseActionItem(group,request)
+        if not item then return false,"resources_unavailable" end
+        local lo,hi
+        if S.IsWateringCan(item) then lo,hi=C.WORK_SLOTS+1,C.WORK_SLOTS+C.WATER_SLOTS
+        else lo=S.ToolSlot(item);hi=lo end
+        if not lo or not S.FindSlot(dest,item,lo,hi) then return false,"equipment_slot_full" end
+        local moved,reason,stranded=S.Transfer(source,dest,item,nil,lo,hi)
+        if stranded then self:KeepStranded(stranded) end
+        return moved,not moved and (reason or "resources_unavailable") or nil
+    end
+    local complete, progress = true, false
+    local function pull(category, prefab, target)
+        local actionuses = category == "fertilizers"
+        local start = self:CountPrefab(prefab, actionuses)
+        local missing = math.max(0, (target or 0) - start)
+        for _, entry in ipairs(S.Items(source)) do
+            if missing > 0 and entry.item.prefab == prefab then
+                local before = self:CountPrefab(prefab, actionuses)
+                local n = actionuses and entry.item.components.finiteuses and 1 or missing
+                local moved, reason, stranded = S.Transfer(source, dest, entry.item, n, 1, C.WORK_SLOTS)
+                if stranded then self:KeepStranded(stranded) end
+                missing = math.max(0, missing - self:CountPrefab(prefab, actionuses) + before)
+                if not moved and reason == "destination_full" then break end
+            end
+        end
+        if self:CountPrefab(prefab, actionuses) > start then progress = true end
+        return missing
+    end
+    -- The requested action's own input goes first, so optional batch inputs
+    -- never take the space or the stock it needs.
+    local primary = needs.primary
+    if primary and primary.prefab then pull(primary.category, primary.prefab, primary.count or 1) end
     for _, category in ipairs({ "seeds", "fertilizers" }) do
         local prefabs = {}
         for prefab in pairs(needs[category] or {}) do prefabs[#prefabs + 1] = prefab end
@@ -203,27 +353,24 @@ function AgriResource:Fetch(group, requirements)
         for _, prefab in ipairs(prefabs) do
             local target = needs[category][prefab]
             target = type(target) == "table" and target.count or target
-            local missing = math.max(0, (target or 0) - self:CountPrefab(prefab, category == "fertilizers"))
-            for _, entry in ipairs(S.Items(source)) do
-                if missing > 0 and entry.item.prefab == prefab then
-                    local before = self:CountPrefab(prefab, category == "fertilizers")
-                    local n = category == "fertilizers" and entry.item.components.finiteuses and 1 or missing
-                    local moved, reason, stranded = S.Transfer(source, dest, entry.item, n, 1, C.WORK_SLOTS)
-                    if stranded then self:KeepStranded(stranded) end
-                    missing = math.max(0, missing - self:CountPrefab(prefab, category == "fertilizers") + before)
-                    if not moved and reason == "destination_full" then complete = false; break end
-                end
-            end
-            if missing > 0 then complete = false end
+            if pull(category, prefab, target) > 0 then complete = false end
         end
     end
-    return complete, complete and nil or "resources_unavailable"
+    -- A missing future batch input never fails the trip once the current
+    -- action's real input is carried; only the current input decides.
+    if primary and primary.prefab then
+        local ready = self:CountPrefab(primary.prefab, primary.category == "fertilizers") > 0
+        return ready, not ready and "resources_unavailable" or nil
+    end
+    if complete or progress then return true end
+    return false, "resources_unavailable"
 end
 
 function AgriResource:Unload(group)
     if not self:CanUnload(group) then return false, "need_unload" end
     local source, dest = self.inst.components.container, group.warehouse.components.container
-    local demand = self:Demand(group)
+    -- Only seeds no live planting (in or out of the current plan) still needs.
+    local demand = self:Demand(group, nil, true)
     local moved, full = 0, false
     for _, entry in ipairs(S.Items(source)) do
         local item, category = entry.item, S.Category(entry.item)
@@ -351,11 +498,11 @@ function AgriResource:HasRecord()
     return false
 end
 
-function AgriResource:FindActionItem(task)
+function AgriResource:FindActionItem(task,container)
     local k, candidate = kind(task), nil
     local desired = task.prefab
     local requested_guid = task.data and (task.data.can_guid or task.data.item_guid)
-    for _, entry in ipairs(S.Items(self.inst.components.container)) do
+    for _, entry in ipairs(S.Items(container or self.inst.components.container)) do
         local item = entry.item
         local eligible = not requested_guid or item.GUID == requested_guid
         if eligible and k == "PLANT" and item.prefab == desired and S.IsSeed(item) then return item end
@@ -364,20 +511,37 @@ function AgriResource:FindActionItem(task)
         if eligible and (k == "WATER" or k == "REFILL") and S.IsWateringCan(item)
             and (k == "REFILL" and uses(item) < capacity(item) or k == "WATER" and uses(item) > 0) then return item end
         -- PLOW never gets an item: automatic plowing is disabled.
-        if eligible and k == "TILL" and (item.components.farmtiller or item.prefab == "fumarole_farm_hoe") then
+        if eligible and k == "TILL" and (item.components.farmtiller or item.prefab == "fumarole_farm_hoe")
+            and (item.components.fumaroletool or uses(item)>0) then
             if item.components.fumaroletool then candidate = item else return item end
         end
         local actionname = k == "HAMMER" and "HAMMER" or k == "CLEAR" and task.data and (task.data.tool_action or task.data.action)
         local action = type(actionname) == "table" and actionname or actionname and ACTIONS[actionname]
         local cold_prefabs = { HAMMER = "fumarolehammer", DIG = "fumaroleshovel", CHOP = "fumaroleaxe", MINE = "fumarolepickaxe" }
         if eligible and action and (item.components.tool and item.components.tool:CanDoAction(action)
-            or type(actionname) == "string" and item.prefab == cold_prefabs[actionname]) then
+            or type(actionname) == "string" and item.prefab == cold_prefabs[actionname])
+            and (item.components.fumaroletool or uses(item)>0) then
             if item.components.fumaroletool then candidate = item else return item end
         end
         if eligible and k == "HEAT" and item.components.fumaroletool
             and (not desired or item.prefab == desired) then return item end
     end
     return candidate
+end
+
+-- An empty carried can is usable equipment: the next step refills it.
+function AgriResource:FindSuppliedEquipment(task,container)
+    local item=self:FindActionItem(task,container)
+    if not item and kind(task)=="WATER" then
+        item=self:FindActionItem({kind="REFILL",data=task.data},container)
+    end
+    return item
+end
+function AgriResource:FindWarehouseActionItem(group,task)
+    if not equipmentrequest(task) then return nil end
+    local warehouse=group and group.warehouse
+    local container=S.Valid(warehouse) and warehouse.components and warehouse.components.container
+    if container then return self:FindSuppliedEquipment(task,container) end
 end
 
 function AgriResource:Borrow(item, task)
@@ -410,10 +574,23 @@ function AgriResource:Prepare(task, group)
     if k == "MUSIC_TEND" and not self:HasRecord() then return false, "missing_record" end
     if not requires then self.current = task; self:ReserveOutputSlots(task); return true end
     local item = self:FindActionItem(task)
+    if not item and equipmentrequest(task) and not self:FindSuppliedEquipment(task) then
+        if self:FindWarehouseActionItem(group,task) then
+            if not self:CanUnload(group) then return false,"need_fetch" end
+            local fetched,reason=self:Fetch(group,self:Demand(group,task))
+            if not fetched then return false,reason end
+            item=self:FindActionItem(task)
+        end
+    end
     if not item and (k == "PLANT" or k == "FERTILIZE") then
-        if not self:CanUnload(group) then return false, "need_fetch" end
-        self:Fetch(group, self:Demand(group, task))
-        item = self:FindActionItem(task)
+        -- No trip to a warehouse that holds none of it: the task blocks with
+        -- a visible reason and a resource change revives it.
+        if not self:CanUnload(group) then
+            if self:WarehouseStocks(group, task) then return false, "need_fetch" end
+        else
+            self:Fetch(group, self:Demand(group, task))
+            item = self:FindActionItem(task)
+        end
     end
     if not item then
         if k == "WATER" then return false, "out_of_water" end

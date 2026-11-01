@@ -77,6 +77,11 @@ function AgriScheduler:SetPlan(plan, group)
     self.viability_keys=viability_keys
     local settings=self.group and self.group.settings or {}
     local intent={settings.planting or "",settings.crop or "",settings.mode or "",tostring(settings.radius),tostring(settings.density),tostring(settings.continuous)}
+    -- Zone groups: density and crop plan live per zone (the planner cancels
+    -- only the affected zone's work), so only group-wide intent counts here.
+    -- The first zone plan of a migrated group changes this key and retires
+    -- the old global controller's preparation and planting.
+    if self.group and self.group.zones_enabled then intent={"zones",settings.planting or "",tostring(settings.radius)} end
     for _,cell in ipairs(self.group and self.group.blueprint and self.group.blueprint.cells or {}) do intent[#intent+1]=tostring(cell.x)..":"..tostring(cell.z) end
     local key=table.concat(intent,"|")
     local changed=self.intent_key and self.intent_key~=key
@@ -110,6 +115,9 @@ function AgriScheduler:SetPlan(plan, group)
                 old.not_before, old.deadline = task.not_before, task.deadline
                 old.deps = task.deps or old.deps
             end
+            -- Stage metadata follows the current plan, also for claimed work
+            -- and for tasks restored from saves made before stages existed.
+            old.stage = task.stage
             old.priority = math.min(old.priority, task.priority or 3)
         end
     end
@@ -143,14 +151,108 @@ function AgriScheduler:Dependencies(task)
     for _, id in ipairs(task.deps or {}) do if not T.IsDone(self.tasks[id]) then return false end end
     return true
 end
+-- A task waiting on work that can never finish (a dependency or suspending
+-- child that is gone or cancelled) does not hold the stage barrier.
+function AgriScheduler:Orphaned(task)
+    local function dead(id) local t = self.tasks[id];return not t or T.TERMINAL[t.state] and not T.IsDone(t) end
+    if task.suspended_by and dead(task.suspended_by) then return true end
+    for _, id in ipairs(task.deps or {}) do if dead(id) then return true end end
+    return false
+end
+-- Zone scope of a task: data.zone_id of its root (P2 children inherit the
+-- zone of the work they serve). nil for legacy/unscoped work.
+function AgriScheduler:ZoneOf(task)
+    local root, depth = task, 0
+    while root.parent_id and self.tasks[root.parent_id] and depth < 4 do root, depth = self.tasks[root.parent_id], depth + 1 end
+    local z = root.data and root.data.zone_id
+    if z == nil then z = task.data and task.data.zone_id end
+    return z
+end
+-- A zone the player is editing or paused: all of its work, including its
+-- P2 logistics children and urgent water, waits. Other zones are unaffected.
+function AgriScheduler:ZoneHeld(task)
+    local holds = self.group and self.group.zone_holds
+    if not holds or next(holds) == nil then return nil end
+    local z = self:ZoneOf(task)
+    return z ~= nil and holds[z] or nil
+end
+-- Lowest unfinished stage among staged tasks (T.STAGE). Every live state
+-- counts: pending, retrying, ready but unclaimable, claimed, running, paused
+-- and blocked, so neither a second robot nor a stuck task bypasses the order.
+-- Only the current plan's tasks (or claimed ones) count, so stale tasks of an
+-- older plan cannot stall a new one. care is the same floor for existing-crop
+-- care (water, tend): preparation that is blocked or that no robot can do
+-- does not hold care back indefinitely.
+-- Each zone has its own stage floor, so a paused, edited or blocked zone
+-- never holds another zone at its stage. Unscoped tasks form one legacy
+-- scope whose floors stay in stage_all/stage_care.
+function AgriScheduler:StageFloors()
+    local floors = {}
+    for _, id in ipairs(self.order) do
+        local task = self.tasks[id]
+        if task and task.stage and not T.TERMINAL[task.state]
+            and (not self.plan_ids or self.plan_ids[id] or self.claims:Get(id)) and not self:Orphaned(task) then
+            local scope = self:ZoneOf(task) or "_"
+            local f = floors[scope] or { all = math.huge, care = math.huge }
+            floors[scope] = f
+            f.all = math.min(f.all, task.stage)
+            if task.state ~= "blocked" and task.waiting_reason ~= "no_capable_robot" then f.care = math.min(f.care, task.stage) end
+        end
+    end
+    self.stage_floors = floors
+    local legacy = floors._ or { all = math.huge, care = math.huge }
+    return legacy.all, legacy.care
+end
+local function simplewater(task) return task.kind == "WATER" and task.data and task.data.simple end
+-- Uses the floors of the last RefreshReady. Priority 1/2 work (viability
+-- care, urgent water, P2 children) is never gated.
+function AgriScheduler:StageGated(task)
+    if not task.stage or task.priority < 3 then return false end
+    local z = self:ZoneOf(task)
+    local all, care = self.stage_all, self.stage_care
+    if z ~= nil then
+        local f = self.stage_floors and self.stage_floors[z]
+        all, care = f and f.all, f and f.care
+    end
+    local floor = task.stage >= T.STAGE.WATER and care or all
+    return (floor or math.huge) < task.stage
+end
 function AgriScheduler:RefreshReady()
     local time = now()
+    local simple = self.group and self.group.settings and self.group.settings.simple ~= false
+    for _, id in ipairs(self.order) do
+        local task = self.tasks[id]
+        if task and not T.TERMINAL[task.state] then
+            -- Saves from before stages existed hold simple work without stage
+            -- metadata; label it here so the barrier applies before the first
+            -- rescan. Children (parent_id) stay unstaged logistics, and legacy
+            -- groups never gain a barrier.
+            if simple and task.stage == nil and not task.parent_id then task.stage = T.SimpleStage(task) end
+            -- Simple watering becomes time-critical (priority 1, the viability
+            -- class) at its measured dry-out deadline, also between rescans, so
+            -- it can preempt unrelated P2 logistics and HigherPriority agrees.
+            if simplewater(task) and task.deadline and task.priority > 1 and task.deadline <= time then task.priority = 1 end
+            -- Logistics children (REFILL, FETCH, HEAT, ...) of such a job share
+            -- its urgency, so another urgent job cannot preempt them halfway.
+            -- Parents precede children in order, so one pass covers a chain.
+            local root, depth = task, 0
+            while root.parent_id and self.tasks[root.parent_id] and depth < 4 do root, depth = self.tasks[root.parent_id], depth + 1 end
+            if root ~= task and simplewater(root) and root.priority < task.priority then task.priority = root.priority end
+        end
+    end
+    local all, care = self:StageFloors()
+    self.stage_all, self.stage_care = all, care
     for _, id in ipairs(self.order) do
         local task = self.tasks[id]
         if task and (task.state == "pending" or task.state == "ready") then
-            local ready = not task.suspended_by and self:Dependencies(task) and (not task.not_before or task.not_before <= time)
+            local held = self:ZoneHeld(task)
+            local gated = not held and self:StageGated(task)
+            local ready = not held and not gated and not task.suspended_by and self:Dependencies(task) and (not task.not_before or task.not_before <= time)
                 and (not task.retry_after or task.retry_after <= time)
             task.state = ready and "ready" or "pending"
+            if held then task.waiting_reason = held
+            elseif gated then task.waiting_reason = "earlier_stage"
+            elseif task.waiting_reason == "earlier_stage" or task.waiting_reason == "zone_paused" or task.waiting_reason == "zone_editing" then task.waiting_reason = nil end
         end
     end
 end
@@ -179,6 +281,12 @@ end
 function AgriScheduler:HigherPriority(task, robot)
     if self:IsFrozen() then return true end
     self:RefreshReady()
+    -- A staged task now behind the group-wide stage gate (earlier work
+    -- appeared on a rescan) pauses even if only another robot can do that
+    -- work; it keeps its claim and resumes through Claim once the earlier
+    -- stages are done. Interrupt records a committed native action first.
+    -- Holding the floor itself never gates it, and P1/P2 work is never gated.
+    if self:StageGated(task) or self:ZoneHeld(task) then return true end
     for _, id in ipairs(self.order) do
         local candidate = self.tasks[id]
         if candidate and candidate.state == "ready" and candidate.priority < task.priority
@@ -202,7 +310,8 @@ function AgriScheduler:CanClaim(robot, task)
     if kind == "PLOW" then return true end
     if kind == "TILL" or kind == "HAMMER" or kind == "HEAT"
         or kind == "CLEAR" and task.data and (task.data.tool_action or task.data.action) then
-        return resource:FindActionItem(task) ~= nil
+        return resource:FindActionItem(task) ~= nil or resource.FindWarehouseActionItem
+            and resource:FindWarehouseActionItem(self.group,task)~=nil
     end
     if kind == "MUSIC_TEND" then
         for _, item in ipairs(resource:OwnItems()) do if item:HasTag("phonograph_record") then return true end end
@@ -210,10 +319,22 @@ function AgriScheduler:CanClaim(robot, task)
     end
     if kind == "WATER" or kind == "REFILL" then
         for _, item in ipairs(resource:OwnItems()) do if item:HasTag("wateringcan") then return true end end
-        return false
+        return resource.FindWarehouseActionItem and resource:FindWarehouseActionItem(self.group,task)~=nil or false
     end
     if kind=="PLANT" or kind=="FERTILIZE" then
-        return resource:FindActionItem(task)~=nil or self.group and U.Valid(self.group.warehouse)
+        if resource:FindActionItem(task)~=nil then return true end
+        local group=self.group
+        if not (group and U.Valid(group.warehouse)) then return false end
+        -- Resources without the stock check keep the old warehouse rule.
+        if not resource.WarehouseStocks or resource:WarehouseStocks(group,task) then return true end
+        -- The warehouse lacks this input: leave the job to a teammate that
+        -- carries it. With nobody able to supply it, claim it anyway so the
+        -- executor reports the visible missing-resource stop.
+        for _,member in ipairs(group.members or {}) do
+            local other=member~=robot and U.Valid(member) and member.components and member.components.agriresource
+            if other and other.FindActionItem and other:FindActionItem(task)~=nil then return false end
+        end
+        return true
     end
     return true
 end
@@ -224,14 +345,23 @@ function AgriScheduler:Claim(robot)
     local current = self:Current(robot)
     if current and (current.state == "claimed" or current.state == "running") then return current end
     local best
+    -- Zone affinity: among equal candidates prefer the zone this robot
+    -- worked in last, so it finishes nearby work before crossing the farm.
+    -- Priority still wins, so urgent water preempts.
+    local home = self.last_zone and self.last_zone[rid]
+    local function near(task) return home ~= nil and self:ZoneOf(task) == home end
     for _, id in ipairs(self.order) do
         local task = self.tasks[id]
         local claim = self.claims:Get(id)
+        -- Own paused work resumes ahead of queued work, but not past the stage
+        -- gate: it keeps its claim and resumes once earlier stages are done.
         local ownpaused = task.state == "paused" and claim and claim.owner == rid and not task.suspended_by
+            and not self:StageGated(task) and not self:ZoneHeld(task)
         if (task.state == "ready" or ownpaused) and (not task.reserved_owner or task.reserved_owner == rid)
             and (not claim or claim.owner == rid or claim.expires <= now()) and self:CanClaim(robot,task) then
             if not best or task.priority < best.priority or task.priority == best.priority
-                and (ownpaused and best.state ~= "paused" or task.state == best.state and task.sequence < best.sequence) then best = task end
+                and (ownpaused and best.state ~= "paused" or task.state == best.state
+                    and (near(task) and not near(best) or near(task) == near(best) and task.sequence < best.sequence)) then best = task end
         end
     end
     if not best or not self.claims:Acquire(best.id, rid, now(), C.CLAIM_TIMEOUT) then return nil end
@@ -259,6 +389,10 @@ function AgriScheduler:Complete(id, robot, cancelled)
     if claim and robot and claim.owner ~= ownerid(robot) then return false end
     self.claims:Release(id)
     if not cancelled and robot and task.last_reason then U.ClearTalk(robot,task.last_reason);task.last_reason=nil end
+    if not cancelled and robot then
+        local z = self:ZoneOf(task)
+        if z ~= nil then self.last_zone = self.last_zone or {};self.last_zone[ownerid(robot)] = z end
+    end
     if task.owner and self.active[ownerid(task.owner)]==id then self.active[ownerid(task.owner)] = nil end
     task.owner, task.state, task.finished = nil, cancelled and "cancelled" or "complete", now()
     task.target,task.target_guid=nil,nil
@@ -299,8 +433,10 @@ function AgriScheduler:Fail(id, robot, reason, immediate_block)
         task.block_revision = self.group and self.group.revision or 0
         self.metrics.blocked = self.metrics.blocked + 1
         U.OnceTalk(robot, task.reason, T.Message(task.reason))
+        -- Only a child that still suspends its parent blocks it: a stale child
+        -- must not block a parent that resumed or another robot now runs.
         local parent = task.parent_id and self.tasks[task.parent_id]
-        if parent then
+        if parent and parent.suspended_by == id then
             parent.suspended_by, parent.state, parent.reason = nil, "blocked", task.reason
             self.claims:Release(parent.id)
             parent.owner = nil
@@ -313,7 +449,13 @@ end
 function AgriScheduler:Unblock(reason)
     for _, id in ipairs(self.order) do
         local task = self.tasks[id]
-        if task.state == "blocked" and (reason ~= "resources" or T.RESOURCE_REASONS[task.reason]) then
+        local parent = task.parent_id and self.tasks[task.parent_id]
+        if task.state == "blocked" and task.parent_id and not (parent and parent.suspended_by == id) then
+            -- Its parent was blocked and released; a resumed parent pushes a
+            -- fresh child, so this one retires instead of rerunning its trip.
+            self.claims:Release(id)
+            task.state, task.reason, task.owner, task.finished = "cancelled", "parent_released", nil, now()
+        elseif task.state == "blocked" and (reason ~= "resources" or T.RESOURCE_REASONS[task.reason]) then
             task.state, task.retries, task.retry_after = "pending", 0, nil
             task.last_reason=task.reason
             task.reason = nil
@@ -328,6 +470,9 @@ function AgriScheduler:PushSubtask(robot, parent, child)
     self.next_child = self.next_child + 1
     child.priority, child.parent_id, child.reserved_owner = 2, parent.id, ownerid(robot)
     child.deps = child.deps or {}
+    -- Logistics and blockers serve the parent's zone: same scope, same holds.
+    local zone = self:ZoneOf(parent)
+    if zone ~= nil then child.data = child.data or {};child.data.zone_id = child.data.zone_id or zone end
     self:Pause(robot, "blocker")
     local task = self:Add(child)
     if not task then return nil end
@@ -397,7 +542,9 @@ function AgriScheduler:Tick(group)
     end
     for _, robot in ipairs(self.group.members) do
         local current = self:Current(robot)
-        if current and self:HigherPriority(current, robot) then self:Pause(robot, self:IsFrozen() and "stopped" or "priority") end
+        if current and self:HigherPriority(current, robot) then
+            self:Pause(robot, self:IsFrozen() and "stopped" or self:ZoneHeld(current) or "priority")
+        end
     end
     for _,id in ipairs(self.order) do
         local task=self.tasks[id]
@@ -504,6 +651,7 @@ function AgriScheduler:Takeover(other)
     self.next_sequence,self.next_child = other.next_sequence,other.next_child
     self.active_p0_threats,self.announced,self.metrics = other.active_p0_threats,other.announced,other.metrics
     self.intent_key,self.plan_ids=other.intent_key,other.plan_ids
+    self.last_zone=other.last_zone
     self.group=other.group
     other.tasks,other.order,other.claims,other.active = {},{},Claims.New(),{}
 end

@@ -2,6 +2,7 @@
 from pathlib import Path
 import ctypes
 import json
+import socket
 import subprocess
 import time
 
@@ -26,8 +27,22 @@ def main():
     working = RUNTIME / "bin64"
     assert (working / "../../storage").resolve() == (HERE / "storage").resolve()
     assert (working / "../../ugc").resolve() == (HERE / "ugc").resolve()
+    # An open player world may own the game's default UDP port. Select a
+    # disposable test port instead of interrupting that world.
+    # Native LAN mode rejects ports outside 10998..11018 and silently falls
+    # back to 10999, so ephemeral OS ports cannot be used here.
+    for test_port in range(10998, 11019):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            try:
+                probe.bind(("0.0.0.0", test_port))
+            except OSError:
+                continue
+            break
+    else:
+        raise RuntimeError("No free native LAN test port in 10998..11018")
     args = [short(executable), "-persistent_storage_root", "../../storage",
             "-conf_dir", "AgriNative", "-cluster", "Smoke", "-shard", "Master",
+            "-port", str(test_port),
             "-offline", "-disabledatacollection", "-skip_update_server_mods",
             "-ugc_directory", "../../ugc", "-nosound", "-nooverlay"]
     (HERE / "ugc").mkdir(exist_ok=True)

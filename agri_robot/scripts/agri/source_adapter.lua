@@ -196,12 +196,17 @@ function M.Capture(group,robot)
     local water=result.resources.water or {};water.soil_per_use=water.per_use;result.resources.water=water
     local moisture,moisture_error=moisture_snapshot(manager,now);if moisture_error then result.reasons[#result.reasons+1]=moisture_error end
     local map=world.Map;local width=map:GetSize();local cells,selected={},{}
+    -- Every tile this capture looked at (farm or not), in field_zones tile
+    -- keys: zone records keep tiles outside it unchanged.
+    local scanned={};result.scanned_tiles=scanned
     local function add(x,z,blueprint)
         local cx,_,cz=map:GetTileCenterPoint(x,0,z);if not cx then return end
         local key=U.CellKey(cx,cz);if selected[key] then return end
+        local tx,tz=map:GetTileCoordsAtPoint(cx,0,cz)
+        if tx and tz then scanned[tostring(tx)..":"..tostring(tz)]=true end
         local farm=map:GetTileAtPoint(cx,0,cz)==WORLD_TILES.FARMING_SOIL
         if farm or blueprint then
-            local tx,tz=map:GetTileCoordsAtPoint(cx,0,cz);local a,b,c=manager:GetTileNutrients(tx,tz)
+            local a,b,c=manager:GetTileNutrients(tx,tz)
             local raw=moisture and moisture[tz*width+tx]
             local cell={key=key,x=cx,z=cz,tile_x=tx,tile_z=tz,is_farm=farm,blueprint=blueprint,plants={},soils={},nutrients={a or 0,b or 0,c or 0},
                 moisture={moisture=raw~=nil and math.max(raw,world.state.wetness or 0) or moisture and (world.state.wetness or 0) or nil,capacity=TUNING.SOIL_MAX_MOISTURE_VALUE,drain=dry_rate(cx,cz),weather={},world_wetness=world.state.wetness or 0}}

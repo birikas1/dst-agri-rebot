@@ -1,6 +1,7 @@
 .test-deps/
 .test-deps-linux/
 tests/native/runtime/
+tests/native/client_*/
 tests/native/storage/
 tests/native/ugc/
 tests/native/logs/
