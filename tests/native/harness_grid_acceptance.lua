@@ -59,6 +59,8 @@ local function run(world)
     for _,e in ipairs(G.TheSim:FindEntities(x,0,z,11,nil,{"CLASSIFIED","INLIMBO"})) do
         if e~=world and e~=portal and not e:HasTag("player") then e:Remove() end
     end
+    -- 0.3.2: robots only work inside a craftable center; build it first.
+    local agri_center=G.SpawnPrefab("agriworkcenter");agri_center.Transform:SetPosition(x-3,0,z)
     local robot=G.SpawnPrefab("agribot")
     robot.Transform:SetPosition(x-3,0,z)
     local hoe=G.SpawnPrefab("farm_hoe")

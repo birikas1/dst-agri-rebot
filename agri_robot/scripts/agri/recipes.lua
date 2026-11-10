@@ -1,13 +1,15 @@
+local Range = require("agri/work_range")
 local M = {}
 function M.Register(env)
     local G = env.GLOBAL or env
     local I, TECH = G.Ingredient, G.TECH
     local names = {
-        AGRIBOT = "农业机器人", AGRIWAREHOUSE = "农业仓库", AGRIWELL = "水井",
+        AGRIBOT = "农业机器人", AGRIWORKCENTER = "农业工作中心", AGRIWAREHOUSE = "农业仓库", AGRIWELL = "水井",
         SUPER_PRESERVER_KIT = "超级保鲜套件", SCALE_THERMOSTAT_MODULE = "龙鳞恒温模块",
     }
     local descriptions = {
-        AGRIBOT = "用真实工具照顾一片农田。",
+        AGRIBOT = "只能放在农业工作中心范围内；用真实工具照顾农田。",
+        AGRIWORKCENTER = "先放中心，再在圈内放机器人；悬停显示工作范围。",
         AGRIWAREHOUSE = "种子、肥料、作物和备用工具各归其位。",
         AGRIWELL = "固定淡水源，供机器人和水壶补水。",
         SUPER_PRESERVER_KIT = "让农业仓库使用极地熊獾箱保鲜机制。",
@@ -26,7 +28,12 @@ function M.Register(env)
         env.AddRecipe2(name, ingredients, tech, config, filters or { "GARDENING" })
     end
     add("agribot", { I("gears", 2), I("boards", 3), I("goldnugget", 4) },
-        TECH.SCIENCE_ONE, "winona_storage_robot", { placer = "agribot_placer" })
+        TECH.SCIENCE_ONE, "winona_storage_robot",
+        -- Only inside an existing work center's radius (client placer + server build).
+        { placer = "agribot_placer", testfn = Range.RobotPlacementTest })
+    -- Vanilla mini sign recipe icon is minisign_item.tex (there is no minisign.tex).
+    add("agriworkcenter", { I("boards", 1) }, TECH.SCIENCE_ONE, "minisign_item",
+        { placer = "agriworkcenter_placer", min_spacing = 1, testfn = Range.CenterPlacementTest })
     add("agriwarehouse", { I("boards", 8) }, TECH.SCIENCE_ONE, "treasurechest_cotl_basic",
         { placer = "agriwarehouse_placer", min_spacing = 1.5 })
     add("agriwell", { I("cutstone", 6), I("boards", 4), I("rope", 2) }, TECH.SCIENCE_ONE, "agriwell",

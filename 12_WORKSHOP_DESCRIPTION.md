@@ -1,6 +1,6 @@
 # 田间管家 · 自动农业机器人 / Field Steward
 
-**0.3.0 正式版 / Release**
+**0.3.3**
 
 使用真实资源的自动农业管理。手动开垦农田，设置方案，准备工具、种子和水，机器人即可完成农活。
 
@@ -10,7 +10,7 @@
 - 点击浮牌展开箱子式作物方案面板，支持比例填满、精确数量、独立暂停与恢复。
 - 输入上限为田区格数×每格孔数：1格8孔最多选8，4格8孔最多选32；降低密度后需修正超额方案。
 - 按田区完成清杂、清坑、打孔、播种、浇水、照料；临近缺水的作物优先补水。
-- 工作中心固定在建造点，移动机器人、主机器人接管和读档不移动中心。悬停木牌或建造时显示范围，半径大时可拉远查看边界。
+- 工作中心单独制作并固定在放置点。必须先放中心，再在范围内放机器人；同一中心可有多台。悬停或放置时显示与雪球发射器相同的范围圈。
 
 ## 仓库、工具与水井
 
@@ -34,7 +34,7 @@ AI协作开发：GPT/Codex与Claude；后续功能按玩家要求由GPT/Codex直
 
 ---
 
-**Field Steward 0.3.0 Release** automates existing farmland using real seeds, tools and water. Connected farm tiles form independent zones with floating plan editors, ratio/exact planting, capacity limits and separate pause controls. Work follows clearing, soil preparation, tilling, planting, watering and tending; urgent watering has priority.
+**Field Steward 0.3.3** automates existing farmland using real seeds, tools and water. Connected farm tiles form independent zones with floating plan editors, ratio/exact planting, capacity limits and separate pause controls. Work follows clearing, soil preparation, tilling, planting, watering and tending; urgent watering has priority.
 
 The67-slot warehouse adds three slots for each of five tool types and three for watering cans. Robots fetch actual equipment and supplies. The new crafted well supplies permanent fresh water: collect an empty can, refill it at a well in the fixed work area, and return to water crops. Wells cost6 cut stone,4 boards and2 rope at Science Machine technology.
 

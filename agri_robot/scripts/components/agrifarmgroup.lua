@@ -61,21 +61,150 @@ function AgriFarmGroup:EnableZones(group)
     group.zone_holds = group.zone_holds or {}
 end
 
+-- Craftable work centers own the farm group. Robots never create a center:
+-- a robot joins the center whose radius it was built in, or stays idle.
+function AgriFarmGroup:SyncWorkCenter(group)
+    local marker=group and group.workcenter
+    if not U.Valid(marker) then return end
+    local x,_,z=marker.Transform:GetWorldPosition()
+    group.center={x=x,z=z}
+    marker._agri_group_id=group.id
+    marker._agri_order_saved=group.placement_order or marker._agri_order_saved or 0
+    marker._agri_radius:set(group.settings.radius)
+    marker._agri_order:set(marker._agri_order_saved)
+    marker._agri_group:set(group.id)
+end
+
 function AgriFarmGroup:RefreshWorkCenter(group)
+    if not group or group._dissolving then return end
+    if U.Valid(group.workcenter) then self:SyncWorkCenter(group) end
+end
+
+local function has_center(group)
+    return group~=nil and U.Valid(group.workcenter)
+end
+AgriFarmGroup.HasCenter=function(_,group) return has_center(group) end
+
+-- Only live craftable centers reserve an area. Dormant groups (old saves
+-- without a center entity) never block a new center.
+function AgriFarmGroup:CanPlaceCenter(x,z,radius,except)
+    radius=radius or C.DEFAULT_RADIUS
+    for _,other in pairs(self.groups) do
+        if other~=except and has_center(other) and other.workcenter~=except then
+            local oradius=other.settings and other.settings.radius or C.DEFAULT_RADIUS
+            if U.DistanceSq({x=x,z=z},other.center or {x=0,z=0})<(radius+oradius)^2 then
+                return false,"工作范围与现有中心重叠"
+            end
+        end
+    end
+    return true
+end
+
+-- Oldest dormant group (no center entity, e.g. a pre-0.3.2 save) whose old
+-- origin lies inside a new center's radius: the new center adopts its plans.
+function AgriFarmGroup:FindDormantGroup(x,z,radius)
+    local best
+    for _,group in pairs(self.groups) do
+        if not has_center(group) and #group.members==0 and group.center
+            and U.DistanceSq({x=x,z=z},group.center)<=radius*radius then
+            if not best or (group.placement_order or math.huge)<(best.placement_order or math.huge) then best=group end
+        end
+    end
+    return best
+end
+
+-- Robots built before their center existed (or detached when a center was
+-- hammered, or loaded from an old save) rejoin when a center covers them.
+function AgriFarmGroup:AdoptRobots(group)
+    if not has_center(group) or not TheSim or not TheSim.FindEntities then return end
+    local p=group.center
+    local radius=group.settings.radius or C.DEFAULT_RADIUS
+    for _,robot in ipairs(TheSim:FindEntities(p.x,0,p.z,radius,{"agribot"},{"INLIMBO"}) or {}) do
+        if U.Valid(robot) and robot:HasTag("agribot") and self:GetGroup(robot)==nil
+            and U.DistanceSq(position(robot),p)<=radius*radius then
+            self:Register(robot)
+        end
+    end
+end
+
+function AgriFarmGroup:RegisterCenter(center,saved)
+    if not U.Valid(center) then return nil end
+    saved=saved or {}
+    for _,group in pairs(self.groups) do
+        if group.workcenter==center then
+            self:SyncWorkCenter(group)
+            return group
+        end
+    end
+    local x,_,z=center.Transform:GetWorldPosition()
+    local point={x=x,z=z}
+    local saved_id=saved.group_id or center._agri_group_id
+    local group=saved_id and self.groups[saved_id] or nil
+    if group and has_center(group) and group.workcenter~=center then
+        group=nil;saved_id=nil
+    end
+    local fresh=group==nil
+    if not group then
+        -- Server-side safety net; the recipe testfn already refused overlaps.
+        local ok,why=self:CanPlaceCenter(x,z,C.DEFAULT_RADIUS,center)
+        if not ok then
+            if center.components.lootdropper then center.components.lootdropper:DropLoot() end
+            center:Remove()
+            return nil,why
+        end
+        group=self:FindDormantGroup(x,z,C.DEFAULT_RADIUS)
+    end
+    if not group then
+        local id=saved_id or ("farm_"..tostring(self.next_group))
+        if not saved_id then self.next_group=self.next_group+1 end
+        group={
+            id=id,members={},primary=nil,center=point,
+            settings=U.Settings(saved.settings),presets={},
+            blueprint={cells={},visible=true,confirmed=false},
+            dirty=true,revision=1,created=now(),last_plan=-C.PLAN_INTERVAL,
+            placement_order=saved.placement_order or center._agri_order_saved or self.next_order,
+        }
+        self.next_order=math.max(self.next_order,(group.placement_order or 0)+1)
+        self:EnableZones(group)
+        self.groups[id]=group
+    elseif saved.placement_order then
+        group.placement_order=saved.placement_order
+    end
+    group.dormant=nil
+    group.workcenter=center
+    group.center=point
+    center._agri_group_id=group.id
+    center._agri_order_saved=group.placement_order
+    if saved.radius and U.Contains(C.RADII,saved.radius) then
+        group.settings.radius=saved.radius
+    end
+    -- An adopted dormant group may carry a larger radius than the overlap test used.
+    if fresh and not self:CanPlaceCenter(x,z,group.settings.radius,group) then
+        group.settings.radius=C.DEFAULT_RADIUS
+    end
+    self:SyncWorkCenter(group)
+    self:SelectPrimary(group)
+    if fresh then self:AdoptRobots(group) end
+    return group
+end
+
+function AgriFarmGroup:UnregisterCenter(center)
+    if not center then return end
+    local group=nil
+    for _,candidate in pairs(self.groups) do
+        if candidate.workcenter==center or candidate.id==center._agri_group_id then
+            group=candidate;break
+        end
+    end
     if not group then return end
-    if not group.primary then
-        if U.Valid(group.workcenter) then group.workcenter:Remove() end
-        group.workcenter=nil
-        return
-    end
-    if not U.Valid(group.workcenter) then group.workcenter=SpawnPrefab("agriworkcenter") end
-    local marker=group.workcenter
-    if marker then
-        marker.Transform:SetPosition(group.center.x,0,group.center.z)
-        marker._agri_radius:set(group.settings.radius)
-        marker._agri_order:set(group.placement_order or 0)
-        marker._agri_group:set(group.id)
-    end
+    group._dissolving=true
+    group.workcenter=nil
+    -- Detach robots but leave them in the world; a new center can reclaim them.
+    local members={}
+    for _,robot in ipairs(group.members) do members[#members+1]=robot end
+    for _,robot in ipairs(members) do self:Unregister(robot) end
+    group._dissolving=nil
+    self.groups[group.id]=nil
 end
 
 function AgriFarmGroup:SelectPrimary(group)
@@ -125,16 +254,29 @@ function AgriFarmGroup:Register(robot, saved)
     robot._agri_build_origin=U.Copy(saved.origin or robot._agri_build_origin or position(robot))
     local saved_id = saved.group_id or robot._agri_group_id
     local group = saved_id and self.groups[saved_id] or nil
+    -- A saved group only counts while its center exists (or is still being
+    -- resolved during world load). Never join a dormant, centerless group.
+    if group and not has_center(group) and not group._awaiting_center then group = nil end
     if not group then
         local candidate, p = nil, position(robot)
+        -- Strict join: the robot must stand inside a live center's radius.
+        -- Multiple robots may share one center; centers stay exclusive.
         for _, other in pairs(self.groups) do
-            local radius = other.settings.radius + robot._agri_personal_settings.radius
-            if #other.members > 0 and U.DistanceSq(p, other.center) <= radius * radius then
+            local radius = other.settings.radius or C.DEFAULT_RADIUS
+            if has_center(other) and U.DistanceSq(p, other.center) <= radius * radius then
                 if not candidate or (other.placement_order or math.huge) < (candidate.placement_order or math.huge) then candidate = other end
             end
         end
-        group = candidate or self:NewGroup(robot, saved_id)
+        group = candidate
     end
+    if not group then
+        -- No center: stay idle. Never spawn a center for a robot.
+        robot._agri_group_id = nil
+        if robot._agri_groupnet then robot._agri_groupnet:set("") end
+        if not self._load_groups then pcall(U.OnceTalk, robot, "no_center", "附近没有农业工作中心，我先待机。") end
+        return nil
+    end
+    U.ClearTalk(robot, "no_center")
     group.members[#group.members+1] = robot
     robot._agri_group_id = group.id
     self:SelectPrimary(group)
@@ -158,7 +300,8 @@ function AgriFarmGroup:Unregister(robot)
     robot._agri_group_id = nil
     self:SelectPrimary(group)
     self:RefreshEditing(group)
-    if #group.members == 0 then self.groups[group.id] = nil end
+    -- Keep the group while its craftable center still exists so teammates can rejoin.
+    if #group.members == 0 and not U.Valid(group.workcenter) then self.groups[group.id] = nil end
 end
 
 function AgriFarmGroup:MarkDirty(group, reason)
@@ -184,6 +327,7 @@ function AgriFarmGroup:CanEdit(player, robot)
 end
 
 function AgriFarmGroup:AcquireLock(player, robot)
+    if U.Valid(robot) and self:GetGroup(robot)==nil then return false, "这台机器人不在任何农业工作中心范围内" end
     if not self:CanEdit(player,robot) then return false, "距离太远或机器人已移除" end
     local lock = self.locks[robot.GUID]
     if lock and lock.expires > now() and lock.userid ~= player.userid then return false, "另一位玩家正在管理" end
@@ -467,7 +611,13 @@ end
 function AgriFarmGroup:UpdateSettings(group, data)
     local settings = U.Copy(group.settings)
     for key, value in pairs(data or {}) do settings[key] = value end
-    group.settings = U.Settings(settings)
+    settings = U.Settings(settings)
+    -- Growing the radius may not make two centers overlap.
+    if settings.radius ~= group.settings.radius and has_center(group) and group.center
+        and not self:CanPlaceCenter(group.center.x, group.center.z, settings.radius, group) then
+        settings.radius = group.settings.radius
+    end
+    group.settings = settings
     self:RefreshWorkCenter(group)
     group.revision = group.revision + 1
     self:MarkDirty(group, "settings")
@@ -502,8 +652,8 @@ function AgriFarmGroup:Snapshot(group, player)
     end
     stats.issues=#(group.blueprint.warnings or {})
     local scheduler = group.scheduler
-    -- Zone groups: the robot panel lists the zones and edits only the
-    -- default ratio template; per-zone plans live in the zone editor.
+    -- Zone groups: the robot panel lists the zones; per-zone plans are
+    -- edited on the farmland floating badges, not in this panel.
     local zones
     if group.zones_enabled then
         zones={}
@@ -591,7 +741,7 @@ function AgriFarmGroup:OnSave()
         local group = self.groups[id]
         local saved = {
             id=id,center=U.Copy(group.center),settings=U.Copy(group.settings),presets=public(group.presets),
-            blueprint=public(group.blueprint),revision=group.revision,warehouse=ref(group.warehouse),members={},
+            blueprint=public(group.blueprint),revision=group.revision,warehouse=ref(group.warehouse),workcenter=ref(group.workcenter),members={},
             hole_cycles=public(group.hole_cycles),
             planner_epoch=group.planner_epoch,planner_config=group.planner_config,
             single_round_started=group.single_round_started,last_continuous=group.last_continuous,
@@ -621,7 +771,8 @@ function AgriFarmGroup:OnLoad(data)
                 blueprint=saved.blueprint or {cells={},visible=true,confirmed=false},
                 revision=saved.revision or 1,dirty=true,last_plan=-C.PLAN_INTERVAL,plan=saved.plan,hole_cycles=saved.hole_cycles or {},
                 planner_epoch=saved.planner_epoch,planner_config=saved.planner_config,
-                single_round_started=saved.single_round_started,last_continuous=saved.last_continuous}
+                single_round_started=saved.single_round_started,last_continuous=saved.last_continuous,
+                _awaiting_center=true}
             self:EnableZones(self.groups[saved.id])
         end
     end
@@ -633,16 +784,46 @@ function AgriFarmGroup:LoadPostPass(newents)
         if group then
             local warehouse=saved.warehouse and newents[saved.warehouse]
             group.warehouse=warehouse and warehouse.entity or nil
-            for _, item in ipairs(saved.members or {}) do
-                local entry=item.guid and newents[item.guid]
-                local robot=entry and entry.entity
-                if U.Valid(robot) then
-                    robot._agri_group_id=group.id
-                    robot._agri_order=item.order or self.next_order
-                    self:Register(robot,{group_id=group.id,placement_order=robot._agri_order})
+            local workcenter=saved.workcenter and newents[saved.workcenter]
+            workcenter=workcenter and workcenter.entity or nil
+            if not U.Valid(group.workcenter) then group.workcenter=U.Valid(workcenter) and workcenter or nil end
+            group._awaiting_center=nil
+            if U.Valid(group.workcenter) then
+                group.workcenter._agri_group_id=group.id
+                self:SyncWorkCenter(group)
+                for _, item in ipairs(saved.members or {}) do
+                    local entry=item.guid and newents[item.guid]
+                    local robot=entry and entry.entity
+                    if U.Valid(robot) then
+                        robot._agri_group_id=group.id
+                        robot._agri_order=item.order or self.next_order
+                        self:Register(robot,{group_id=group.id,placement_order=robot._agri_order})
+                    end
+                end
+                self:SelectPrimary(group)
+                self:RefreshWorkCenter(group)
+            else
+                -- Old save (<=0.3.0 derived marker, or center gone): keep the
+                -- plans dormant; never spawn a center. Robots idle until the
+                -- player builds a center over them, which adopts this group.
+                group.dormant=true
+                local members={}
+                for _,robot in ipairs(group.members) do members[#members+1]=robot end
+                group.members={};group.primary=nil;group.scheduler=nil
+                for _,robot in ipairs(members) do
+                    robot._agri_group_id=nil
+                    if robot._agri_groupnet then robot._agri_groupnet:set("") end
+                end
+                for _, item in ipairs(saved.members or {}) do
+                    local entry=item.guid and newents[item.guid]
+                    local robot=entry and entry.entity
+                    if U.Valid(robot) then
+                        robot._agri_group_id=nil
+                        robot._agri_order=item.order or robot._agri_order
+                        if robot._agri_groupnet then robot._agri_groupnet:set("") end
+                    end
                 end
             end
-            self:SelectPrimary(group)
         end
     end
     self._load_groups=nil
