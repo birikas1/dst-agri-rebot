@@ -22,7 +22,7 @@ def main():
     content = log.read_text(encoding="utf-8", errors="replace")
     if "COMPLETE native_range_preview" not in content or "[AGRI_NATIVE] FAIL" in content or "LUA ERROR" in content:
         raise SystemExit("FAIL: native preview; see " + str(log))
-    print("PASS: recipe wiring, native circle assets, fixed/new origins, movement and cancellation; mouse UI not certified")
+    print("PASS: center/robot recipe testfns, placers, no auto-center, overlap rejection; mouse UI not certified")
 
 if __name__ == "__main__":
     main()

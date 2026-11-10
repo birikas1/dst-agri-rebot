@@ -28,6 +28,8 @@ local function run(world)
     world.Map:SetTile(tx,tz,G.WORLD_TILES.FARMING_SOIL)
     world.components.farming_manager:AddSoilMoistureAtPoint(x,0,z,-1000000)
     world.components.farming_manager:AddTileNutrients(tx,tz,100,100,100)
+    -- 0.3.2: robots only work inside a craftable center; build it first.
+    local agri_center=G.SpawnPrefab("agriworkcenter");agri_center.Transform:SetPosition(x-3,0,z)
     local robot=G.SpawnPrefab("agribot");robot.Transform:SetPosition(x-3,0,z)
     local warehouse=G.SpawnPrefab("agriwarehouse");warehouse.Transform:SetPosition(x+9,0,z+3)
     local hoe=G.SpawnPrefab("golden_farm_hoe")

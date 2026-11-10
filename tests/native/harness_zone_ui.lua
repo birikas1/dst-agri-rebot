@@ -28,6 +28,8 @@ AddPlayerPostInit(function(player)
         end
         player.Transform:SetPosition(x+6,0,z-6)
         player.components.health:SetInvincible(true)
+        -- 0.3.2: robots only work inside a craftable center; build it first.
+        local agri_center=G.SpawnPrefab("agriworkcenter");agri_center.Transform:SetPosition(x+8,0,z)
         local robot=G.SpawnPrefab("agribot");robot.Transform:SetPosition(x+8,0,z)
         robot.components.container:GiveItem(G.SpawnPrefab("golden_farm_hoe"),26)
         robot.components.container:GiveItem(G.SpawnPrefab("shovel"),27)

@@ -1,4 +1,6 @@
 -- Isolated engine integration only. Does not certify mouse/crafting UI.
+-- 0.3.2 contract: center recipe + placer, robot only inside a center,
+-- no automatic centers, overlap rejection, flingomatic-style ring assets.
 local G=GLOBAL
 local function check(ok,msg)
     if not ok then G.error(msg)end
@@ -9,45 +11,29 @@ AddPrefabPostInit("world",function(world)
     world:DoTaskInTime(3,function()
         local ok,err=G.pcall(function()
             local reg=world.components.agrifarmgroup;reg._task:Cancel()
-            check(G.AllRecipes.agribot and G.AllRecipes.agribot.placer=="agribot_placer","recipe connects to agribot range placer")
-            local def=G.Prefabs.agribot_placer;local dependency=false
-            for _,name in ipairs(def and def.deps or {})do if name=="reticuleaoe"then dependency=true end end
-            check(dependency,"placer explicitly preloads native circle")
+            local bot,center=G.AllRecipes.agribot,G.AllRecipes.agriworkcenter
+            check(bot and bot.placer=="agribot_placer" and bot.testfn~=nil,"robot recipe has placer and center-range testfn")
+            check(center and center.placer=="agriworkcenter_placer" and center.testfn~=nil,"center recipe has placer and overlap testfn")
+            check(center.ingredients[1].type=="boards" and center.ingredients[1].amount==1,"center costs one board")
+            check(G.Prefabs.agriworkcenter_placer~=nil and G.Prefabs.agribot_placer~=nil,"both placer prefabs registered")
+            local placer=G.SpawnPrefab("agriworkcenter_placer")
+            check(placer and placer.components.placer and #placer.components.placer.linked==1,"center placer is ring + linked sign")
+            placer:Remove()
             local portal
             for _,e in pairs(G.Ents)do if e.prefab=="multiplayer_portal"then portal=e;break end end
             check(portal~=nil,"native preview fixture portal")
-            local x,_,z=portal.Transform:GetWorldPosition();x=x+4;z=z+4
+            local x,_,z=portal.Transform:GetWorldPosition();x=x+40;z=z+40
+            check(not bot.testfn(G.Vector3(x,0,z)),"robot refused with no center")
+            local before=#G.TheSim:FindEntities(x,0,z,30,{"agriworkcenter"})
             local robot=G.SpawnPrefab("agribot");robot.Transform:SetPosition(x,0,z)
-            local group=reg:Register(robot);local marker=group.workcenter
-            check(marker and marker:IsValid() and marker._agri_range==nil,"dedicated center creates no automatic hover graphics")
-            local cx,_,cz=marker.Transform:GetWorldPosition()
-            local placer=G.SpawnPrefab("agribot_placer")
-            local function preview(px,pz)
-                placer.Transform:SetPosition(px,0,pz)
-                placer.components.placer.mouse_blocked=false
-                placer.components.placer.onupdatetransform(placer)
-                check(placer._agri_range and #placer._agri_range==1,"native preview creates one circle")
-                return placer._agri_range[1]
-            end
-            local circle=preview(cx+2,cz)
-            local rx,_,rz=circle.Transform:GetWorldPosition()
-            check(circle:IsValid() and circle.prefab=="reticuleaoe" and circle.persists==false,"native circle asset instantiates without persistence")
-            check(rx==cx and rz==cz,"nearby placement previews existing fixed group center")
-            reg:UpdateSettings(group,{radius=8})
-            check(preview(cx+3,cz)==circle and placer._agri_range.radius==8,"group radius update reuses native preview circle")
-            local scale=circle.Transform:GetScale()
-            check(math.abs(scale-2)<.00001,"native circle scale matches eight-unit radius")
-            circle=preview(cx+80,cz+80);rx,_,rz=circle.Transform:GetWorldPosition()
-            check(rx==cx+80 and rz==cz+80 and placer._agri_range.radius==16,"new group preview follows placement with default radius16")
-            circle=preview(cx+84,cz+80);rx,_,rz=circle.Transform:GetWorldPosition()
-            check(rx==cx+84 and rz==cz+80,"native preview moves with placement transform")
-            placer.components.placer.mouse_blocked=true
-            placer.components.placer.onupdatetransform(placer)
-            check(not circle:IsValid() and placer._agri_range==nil,"HUD-blocked native preview clears circle")
-            circle=preview(cx+84,cz+80)
-            placer:Remove()
-            check(not circle:IsValid() and marker:IsValid(),"native cancel removes circle while preserving group center")
-            robot:Remove()
+            check(reg:Register(robot)==nil,"robot without center stays idle")
+            check(#G.TheSim:FindEntities(x,0,z,30,{"agriworkcenter"})==before,"robot never spawns a center")
+            local c=G.SpawnPrefab("agriworkcenter");c.Transform:SetPosition(x+3,0,z)
+            local group=reg:RegisterCenter(c)
+            check(group and group.workcenter==c and reg:GetGroup(robot)==group,"new center adopts idle robot in range")
+            check(bot.testfn(G.Vector3(x+6,0,z)) and not bot.testfn(G.Vector3(x+40,0,z)),"robot allowed inside, refused outside")
+            check(not center.testfn(G.Vector3(x+20,0,z)) and center.testfn(G.Vector3(x+40,0,z)),"overlapping center refused")
+            robot:Remove();c:Remove()
             print("[AGRI_NATIVE] COMPLETE native_range_preview")
         end)
         if not ok then print("[AGRI_NATIVE] FAIL "..tostring(err))end

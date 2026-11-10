@@ -1,5 +1,5 @@
 local C = {
-    VERSION = "0.3.0",
+    VERSION = "0.3.3",
     SOURCE_BUILD = 756039,
     SCHEMA_VERSION = 1,
     RADII = { 8, 12, 16, 20, 24 },

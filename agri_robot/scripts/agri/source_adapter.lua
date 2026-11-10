@@ -2,6 +2,7 @@
 -- reads here; the algorithms accept injected plain snapshots for verification.
 local U=require("agri/util")
 local C=require("agri/constants")
+local S=require("agri/storage")
 local M={}
 local cached_defs
 local function point(inst) local x,_,z=inst.Transform:GetWorldPosition();return {x=x,z=z} end
@@ -176,6 +177,25 @@ local function random_definition(defs)
     end end
     return d
 end
+-- Loose items robots may collect: farm seeds/products, returned plows,
+-- loot sitting on a cultivated plot, and work tools / watering cans inside
+-- the bound centre's radius. Held, unpickable, or non-tool clutter is ignored.
+function M.IsGroundPickup(entity, opts)
+    opts = opts or {}
+    if not valid(entity) then return nil end
+    local item = entity.components and entity.components.inventoryitem
+    if not item or item.owner ~= nil or item.canbepickedup == false then return nil end
+    if entity:HasTag("irreplaceable") or entity:HasTag("heavy") or entity:HasTag("oversized_veggie") then return nil end
+    local p = opts.point
+    if p == nil and entity.Transform then p = point(entity) end
+    local center, radius = opts.center, opts.radius
+    if p and center and radius and U.DistanceSq(p, center) > radius * radius then return nil end
+    if entity.prefab == "farm_plow_item" then return "plow" end
+    if S.IsWorkTool(entity) then return "tool" end
+    local seeds, products, cell = opts.seeds or {}, opts.products or {}, opts.cell
+    if seeds[entity.prefab] or products[entity.prefab] or (cell and cell.is_farm) then return "loot" end
+    return nil
+end
 -- Automatic plowing is disabled: there is never a plowable-ground candidate.
 -- Kept as an empty answer so no caller can start a scan or a deployment.
 function M.PlowCandidates(group,robot,limit,skip)
@@ -286,17 +306,19 @@ function M.Capture(group,robot)
         if oversized[entity.prefab] then result.oversized[#result.oversized+1]={GUID=entity.GUID,entity=entity,x=p.x,z=p.z}
         elseif cell and (entity:HasTag("farm_debris") or entity:HasTag("weed")) and entity.components.workable and entity.components.workable:GetWorkAction()==ACTIONS.DIG then
             result.debris[#result.debris+1]={entity=entity,id=entity.GUID,point=p,cell=cell.key,work=call(entity.components.workable,"GetWorkLeft") or 1}
-        elseif entity.components.inventoryitem and not entity.components.inventoryitem.owner
-            and entity.components.inventoryitem.canbepickedup~=false
-            and not entity:HasTag("irreplaceable") and not entity:HasTag("heavy") and not entity:HasTag("oversized_veggie")
-            and (seeds[entity.prefab] or products[entity.prefab] or plow_item or cell and cell.is_farm) then
+        else
             -- Real debris loot and the returned plow can block the first hole
             -- before a complete layout exists. Clear safe loose items on the
             -- selected cultivated plot before asking for that complete layout.
-            -- A ground plow anywhere in the radius is collected for the
-            -- warehouse; held (owner), folding (not pickable) ones are not.
-            result.pickups[#result.pickups+1]={entity=entity,id=entity.GUID,point=p,prefab=entity.prefab,
-                priority=cell and cell.is_farm and 2 or 3,blocker=cell and cell.is_farm or false}
+            -- Work tools and watering cans anywhere in the work radius are
+            -- collected so robots can equip one and warehouse the surplus.
+            -- Held (owner), folding (not pickable) and out-of-range items are not.
+            local kind=M.IsGroundPickup(entity,{point=p,cell=cell,center=center,radius=radius,seeds=seeds,products=products})
+            if kind then
+                local urgent=kind=="tool" or (cell and cell.is_farm)
+                result.pickups[#result.pickups+1]={entity=entity,id=entity.GUID,point=p,prefab=entity.prefab,
+                    priority=urgent and 2 or 3,blocker=cell and cell.is_farm or false,kind=kind}
+            end
         end
     end end
     table.sort(cells,function(a,b)return a.key<b.key end)

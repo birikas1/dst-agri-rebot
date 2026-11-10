@@ -30,6 +30,8 @@ local function run(world)
     for _,p in ipairs(Simple.Points({x=x,z=z},9,G.GetFarmTillSpacing()))do
         G.SpawnPrefab("farm_soil").Transform:SetPosition(p.x,0,p.z)
     end
+    -- 0.3.2: robots only work inside a craftable center; build it first.
+    local agri_center=G.SpawnPrefab("agriworkcenter");agri_center.Transform:SetPosition(x-3,0,z)
     local robot=G.SpawnPrefab("agribot");robot.Transform:SetPosition(x-3,0,z)
     local warehouse=G.SpawnPrefab("agriwarehouse");warehouse.Transform:SetPosition(x+8,0,z+3)
     local function stock(prefab,n,slot)

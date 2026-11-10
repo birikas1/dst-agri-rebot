@@ -26,6 +26,8 @@ local function run(world)
         world.components.farming_manager:AddSoilMoistureAtPoint(x+p[1]*4,0,z+p[2]*4,100000)
         world.components.farming_manager:AddTileNutrients(tx+p[1],tz+p[2],100,100,100)
     end
+    -- 0.3.2: robots only work inside a craftable center; build it first.
+    local agri_center=G.SpawnPrefab("agriworkcenter");agri_center.Transform:SetPosition(x+8,0,z)
     local robot=G.SpawnPrefab("agribot");robot.Transform:SetPosition(x+8,0,z)
     local warehouse=G.SpawnPrefab("agriwarehouse");warehouse.Transform:SetPosition(x+8,0,z-8)
     check(robot.components.container:GiveItem(G.SpawnPrefab("golden_farm_hoe"),26),"zone native golden hoe")
@@ -38,14 +40,14 @@ local function run(world)
     group.settings.radius=24;group.settings.density="8";group.settings.plan={};group.settings.running=true
     reg:SetWarehouse(group,warehouse);reg:Tick()
     local marker=group.workcenter
-    check(marker and marker:IsValid() and marker.prefab=="agriworkcenter" and marker.persists==false,"native nonpersistent work center exists")
+    check(marker and marker:IsValid() and marker.prefab=="agriworkcenter" and marker.persists==true,"native craftable work center persists")
     local cx,_,cz=marker.Transform:GetWorldPosition()
     check(cx==x+8 and cz==z and marker._agri_radius:value()==24,"native marker uses original placement and current radius")
     robot.Transform:SetPosition(x+10,0,z);reg:SelectPrimary(group)
     check(group.center.x==cx and marker.Transform:GetWorldPosition()==cx and group.workcenter==marker,"native moving robot cannot move or duplicate work center")
     robot.Transform:SetPosition(x+8,0,z)
     local placer=G.SpawnPrefab("agribot_placer")
-    check(placer and placer.components.placer.onupdatetransform~=nil,"native build placer loads range callback")
+    check(placer and placer.components.placer~=nil and G.AllRecipes.agribot.testfn~=nil,"native robot placer loads and recipe validates center range")
     placer:Remove()
     check(group.zones_enabled and #group.zone_order==3,"native 4 connected tiles and two separated tiles become3 zones")
     local a,b,c

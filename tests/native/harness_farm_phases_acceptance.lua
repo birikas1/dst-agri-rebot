@@ -35,6 +35,8 @@ local function run(world)
         local soil=G.SpawnPrefab("farm_soil");soil.Transform:SetPosition(cx+.7,0,cz-.9);soils[#soils+1]=soil
         local d=G.SpawnPrefab("farm_soil_debris");d.Transform:SetPosition(cx-.7,0,cz+.8);debris[#debris+1]=d
     end end
+    -- 0.3.2: robots only work inside a craftable center; build it first.
+    local agri_center=G.SpawnPrefab("agriworkcenter");agri_center.Transform:SetPosition(x-2,0,z-2)
     local robot=G.SpawnPrefab("agribot");robot.Transform:SetPosition(x-2,0,z-2)
     local container=robot.components.container
     -- A normal hoe lasts only 25 holes; use the native golden tool so this

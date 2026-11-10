@@ -30,7 +30,10 @@ AddPrefabPostInit("world",function(world)
                     robot:Remove()
                     check(group.primary==helper and group.workcenter==marker and marker:IsValid(),"native original robot removal keeps center for teammate")
                     helper:Remove()
-                    check(not marker:IsValid() and reg.groups[group.id]==nil,"native last robot removal cleans center")
+                    check(marker:IsValid() and reg.groups[group.id] and #group.members==0,"native last robot removal keeps craftable center")
+                    local gid=group.id
+                    marker:Remove()
+                    check(not marker:IsValid() and reg.groups[gid]==nil,"native hammering center dissolves empty group")
                 end
             end
             check(count>0,"native saved group exists")

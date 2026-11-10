@@ -132,6 +132,10 @@ function M.RobotTest(container, item, slot)
         and item.prefab ~= "scale_thermostat_module"
 end
 
+function M.IsWorkTool(item)
+    return M.ToolSlot(item) ~= nil or M.IsWateringCan(item)
+end
+
 function M.ToolSlot(item)
     if not item or M.IsRecyclable(item) then return nil end
     if item.components and item.components.farmtiller or item.prefab=="fumarole_farm_hoe" then return 26 end

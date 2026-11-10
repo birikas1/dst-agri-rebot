@@ -80,6 +80,8 @@ local function run(world)
     end
     local point={x=x,z=z}
     check(world.Map:CanTillSoilAtPoint(x,0,z,false),"native test tile can be tilled")
+    -- 0.3.2: robots only work inside a craftable center; build it first.
+    local agri_center=G.SpawnPrefab("agriworkcenter");agri_center.Transform:SetPosition(x-8,0,z)
     local robot=G.SpawnPrefab("agribot")
     check(robot~=nil,"spawn agribot")
     robot.Transform:SetPosition(x-8,0,z)

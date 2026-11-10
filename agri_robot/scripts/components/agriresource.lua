@@ -400,6 +400,18 @@ function AgriResource:Unload(group)
             if success then moved = moved + 1 else full = true end
         end
     end
+    -- Surplus work tools (and overflow watering cans) leave after one of
+    -- each kind has been kept in the dedicated equipment slot.
+    self:OrganizeTools()
+    for _, packed in ipairs(self:SurplusEquipment()) do
+        local item, from = packed.item, packed.source
+        local lo, hi = S.WarehouseEquipmentRange(item)
+        if lo then
+            local success, _, stranded = S.Transfer(from, dest, item, nil, lo, hi)
+            if stranded then self:KeepStranded(stranded) end
+            if success then moved = moved + 1 else full = true end
+        end
+    end
     self:Recover()
     return moved > 0 or not full, full and "warehouse_full" or nil
 end
@@ -432,6 +444,41 @@ function AgriResource:RecycleBlocked(group)
     return nil, #items
 end
 
+-- After organizing, a kept tool lives in its dedicated slot. Any extra copy
+-- still in work inventory, or a watering can stranded in the action bridge
+-- because the water slots were full, is surplus and should go to the warehouse.
+function AgriResource:SurplusEquipment()
+    local out = {}
+    self:OrganizeTools()
+    local container = self.inst.components.container
+    for _, entry in ipairs(S.Items(container)) do
+        if entry.slot and entry.slot <= C.WORK_SLOTS and S.ToolSlot(entry.item) then
+            out[#out + 1] = { item = entry.item, source = container }
+        end
+    end
+    local inventory = self.inst.components.inventory
+    for _, entry in ipairs(inventoryitems(inventory)) do
+        if entry.slot and S.IsWorkTool(entry.item) then
+            out[#out + 1] = { item = entry.item, source = inventory }
+        end
+    end
+    return out
+end
+
+function AgriResource:SurplusBlocked(group)
+    local items = self:SurplusEquipment()
+    if #items == 0 then return nil, 0 end
+    if group == nil then
+        local registry = TheWorld.components.agrifarmgroup
+        group = registry and registry:GetGroup(self.inst)
+    end
+    local warehouse = group and S.Valid(group.warehouse) and group.warehouse.components.container
+    if not warehouse then return "surplus_no_warehouse", #items end
+    local lo, hi = S.WarehouseEquipmentRange(items[1].item)
+    if not lo or not S.FindSlot(warehouse, items[1].item, lo, hi) then return "surplus_warehouse_full", #items end
+    return nil, #items
+end
+
 function AgriResource:NeedsUnload(force)
     local crops = 0
     for _, entry in ipairs(S.Items(self.inst.components.container)) do
@@ -444,6 +491,11 @@ function AgriResource:NeedsUnload(force)
         if blocked == code then U.OnceTalk(self.inst, code, T.Message(code)) else U.ClearTalk(self.inst, code) end
     end
     if plows > 0 and blocked == nil then return true end
+    local surplus_blocked, surplus = self:SurplusBlocked()
+    for _, code in ipairs({ "surplus_no_warehouse", "surplus_warehouse_full" }) do
+        if surplus_blocked == code then U.OnceTalk(self.inst, code, T.Message(code)) else U.ClearTalk(self.inst, code) end
+    end
+    if surplus > 0 and surplus_blocked == nil then return true end
     return crops > 0 and (force == true or crops >= 3 or S.FreeSlots(self.inst.components.container, 1, C.WORK_SLOTS) <= 2)
 end
 
@@ -453,7 +505,11 @@ function AgriResource:HasOutputSpace(task)
     local target = task and task.target
     local definition = target and (target.plant_def or S.CropDefinition(target.prefab))
     local outputs = task and task.data and task.data.expected_outputs or {}
-    if kind(task) == "PICKUP" and target then outputs = { [target.prefab] = S.Count(target) }
+    if kind(task) == "PICKUP" and target then
+        local toolslot = S.ToolSlot(target)
+        if toolslot and container:GetItemInSlot(toolslot) == nil then return true end
+        if S.IsWateringCan(target) and S.FreeSlots(container, C.WORK_SLOTS + 1, C.WORK_SLOTS + C.WATER_SLOTS) > 0 then return true end
+        outputs = { [target.prefab] = S.Count(target) }
     elseif definition then
         -- A missing native quantity is unknown, not one free use. Until a
         -- precise quantity is supplied, reserve a whole empty slot per output.

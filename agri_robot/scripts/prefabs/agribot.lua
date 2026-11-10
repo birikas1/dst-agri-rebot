@@ -1,7 +1,7 @@
 local C = require("agri/constants")
 local U = require("agri/util")
 local assets = { Asset("ANIM", "anim/winona_storage_robot.zip") }
-local prefabs = { "collapse_small", "agriworkcenter", "reticuleaoe" }
+local prefabs = { "collapse_small" }
 
 local function registry(inst)
     return TheWorld and TheWorld.components.agrifarmgroup
@@ -133,7 +133,8 @@ local function fn()
     return inst
 end
 
+-- Recipe testfn (agri/work_range.RobotPlacementTest) turns this placer red
+-- outside every work center; centers in range show rings via deployhelper.
 local placer=MakePlacer("agribot_placer", "winona_storage_robot", "winona_storage_robot", "idle_off",
     nil,nil,nil,nil,nil,nil,require("agri/work_range").SetupPlacer)
-placer.deps={"reticuleaoe"}
 return Prefab("agribot", fn, assets, prefabs),placer
